@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 
-import { IAllLoadedScriptsResponseBody } from 'vscode-chrome-debug-core';
+import { IGetLoadedSourcesResponseBody } from 'vscode-chrome-debug-core';
 import { DebugClient } from 'vscode-debugadapter-testsupport';
 import { DebugProtocol } from 'vscode-debugprotocol';
 
@@ -47,8 +47,8 @@ export class ExtendedDebugClient extends DebugClient {
         return results[0];
     }
 
-    async getLoadedScripts(): Promise<IAllLoadedScriptsResponseBody> {
-        const response = await this.send('getLoadedScripts')
+    async loadedSources(args: DebugProtocol.LoadedSourcesArguments): Promise<IGetLoadedSourcesResponseBody> {
+        const response = await this.send('loadedSources');
         return response.body;
     }
 
@@ -153,20 +153,23 @@ export class ExtendedDebugClient extends DebugClient {
                     source: { path: location.path }
                 });
             }).then(response => {
-                const bp = response.body.breakpoints[0];
+                if (response.body.breakpoints.length > 0) {
+                    const bp = response.body.breakpoints[0];
 
-                if (typeof location.verified === 'boolean') {
-                    assert.equal(bp.verified, location.verified, 'breakpoint verification mismatch: verified');
+                    if (typeof location.verified === 'boolean') {
+                        assert.equal(bp.verified, location.verified, 'breakpoint verification mismatch: verified');
+                    }
+                    if (bp.source && bp.source.path) {
+                        this.assertPath(bp.source.path, location.path, 'breakpoint verification mismatch: path');
+                    }
+                    if (typeof bp.line === 'number') {
+                        assert.equal(bp.line, location.line, 'breakpoint verification mismatch: line');
+                    }
+                    if (typeof location.column === 'number' && typeof bp.column === 'number') {
+                        assert.equal(bp.column, location.column, 'breakpoint verification mismatch: column');
+                    }
                 }
-                if (bp.source && bp.source.path) {
-                    this.assertPath(bp.source.path, location.path, 'breakpoint verification mismatch: path');
-                }
-                if (typeof bp.line === 'number') {
-                    assert.equal(bp.line, location.line, 'breakpoint verification mismatch: line');
-                }
-                if (typeof location.column === 'number' && typeof bp.column === 'number') {
-                    assert.equal(bp.column, location.column, 'breakpoint verification mismatch: column');
-                }
+
                 return this.configurationDoneRequest();
             }),
 

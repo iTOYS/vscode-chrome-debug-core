@@ -2,13 +2,13 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {SourceMapConsumer, MappedPosition} from 'source-map';
+import { SourceMapConsumer, MappedPosition } from 'source-map';
 import * as path from 'path';
 
 import * as sourceMapUtils from './sourceMapUtils';
 import * as utils from '../utils';
-import {logger} from 'vscode-debugadapter';
-import {ISourceMapPathOverrides} from '../debugAdapterInterfaces';
+import { logger } from 'vscode-debugadapter';
+import { IPathMapping } from '../debugAdapterInterfaces';
 
 export type MappedPosition = MappedPosition;
 
@@ -43,7 +43,7 @@ export class SourceMap {
             // is not always needed.
             this._allSourcePathDetails = this._sources.map((inferredPath, i) => {
                 const originalSource = this._originalSources[i];
-                const originalPath = this._originalSourceRoot ? path.join(this._originalSourceRoot, originalSource) : originalSource;
+                const originalPath = this._originalSourceRoot ? sourceMapUtils.getFullSourceEntry(this._originalSourceRoot, originalSource) : originalSource;
                 return <ISourcePathDetails>{
                     inferredPath,
                     originalPath,
@@ -71,11 +71,10 @@ export class SourceMap {
     }
 
     /**
-     * pathToGenerated - an absolute local path or a URL
-     * json - sourcemap contents
-     * webRoot - an absolute path
+     * generatedPath: an absolute local path or a URL
+     * json: sourcemap contents as string
      */
-    public constructor(generatedPath: string, json: string, webRoot?: string, sourceMapPathOverrides?: ISourceMapPathOverrides) {
+    public constructor(generatedPath: string, json: string, pathMapping?: IPathMapping, sourceMapPathOverrides?: utils.IStringDictionary<string>, isVSClient = false) {
         this._generatedPath = generatedPath;
 
         const sm = JSON.parse(json);
@@ -85,16 +84,17 @@ export class SourceMap {
             logger.log('Warning: if you are using gulp-sourcemaps < 2.0 directly or indirectly, you may need to set sourceRoot manually in your build config, if your files are not actually under a directory called /source');
         }
         logger.log(`SourceMap: sources: ${JSON.stringify(sm.sources)}`);
-        if (webRoot) {
-            logger.log(`SourceMap: webRoot: ${webRoot}`);
+        if (pathMapping) {
+            logger.log(`SourceMap: pathMapping: ${JSON.stringify(pathMapping)}`);
         }
 
         // Absolute path
-        const computedSourceRoot = sourceMapUtils.getComputedSourceRoot(sm.sourceRoot, this._generatedPath, webRoot);
+        const computedSourceRoot = sourceMapUtils.getComputedSourceRoot(sm.sourceRoot, this._generatedPath, pathMapping);
 
         // Overwrite the sourcemap's sourceRoot with the version that's resolved to an absolute path,
         // so the work above only has to be done once
         this._originalSourceRoot = sm.sourceRoot;
+        this._originalSources = sm.sources;
         sm.sourceRoot = null;
 
         // sm.sources are initially relative paths, file:/// urls, made-up urls like webpack:///./app.js, or paths that start with /.
@@ -102,8 +102,8 @@ export class SourceMap {
         // it needs to look them up later in exactly the same format.
         this._sources = sm.sources.map(sourcePath => {
             if (sourceMapPathOverrides) {
-                const fullSourceEntry = this._originalSourceRoot ? path.join(this._originalSourceRoot, sourcePath) : sourcePath;
-                const mappedFullSourceEntry = sourceMapUtils.applySourceMapPathOverrides(fullSourceEntry, sourceMapPathOverrides);
+                const fullSourceEntry = sourceMapUtils.getFullSourceEntry(this._originalSourceRoot, sourcePath);
+                const mappedFullSourceEntry = sourceMapUtils.applySourceMapPathOverrides(fullSourceEntry, sourceMapPathOverrides, isVSClient);
                 if (fullSourceEntry !== mappedFullSourceEntry) {
                     return utils.canonicalizeUrl(mappedFullSourceEntry);
                 }
@@ -123,13 +123,12 @@ export class SourceMap {
         });
 
         // Rewrite sm.sources to same as this._sources but file url with forward slashes
-        this._originalSources = sm.sources;
         sm.sources = this._sources.map(sourceAbsPath => {
             // Convert to file:/// url. After this, it's a file URL for an absolute path to a file on disk with forward slashes.
             // We lowercase so authored <-> generated mapping is not case sensitive.
             const lowerCaseSourceAbsPath = sourceAbsPath.toLowerCase();
             this._authoredPathCaseMap.set(lowerCaseSourceAbsPath, sourceAbsPath);
-            return utils.pathToFileURL(lowerCaseSourceAbsPath);
+            return utils.pathToFileURL(lowerCaseSourceAbsPath, true);
         });
 
         this._smc = new SourceMapConsumer(sm);
@@ -203,7 +202,7 @@ export class SourceMap {
 
         // sources in the sourcemap have been forced to file:///
         // Convert to lowerCase so search is case insensitive
-        source = utils.pathToFileURL(source.toLowerCase());
+        source = utils.pathToFileURL(source.toLowerCase(), true);
 
         const lookupArgs = {
             line,
@@ -231,7 +230,7 @@ export class SourceMap {
     }
 
     public sourceContentFor(authoredSourcePath: string): string {
-        authoredSourcePath = utils.pathToFileURL(authoredSourcePath);
+        authoredSourcePath = utils.pathToFileURL(authoredSourcePath, true);
         return (<any>this._smc).sourceContentFor(authoredSourcePath, /*returnNullOnMissing=*/true);
     }
 }

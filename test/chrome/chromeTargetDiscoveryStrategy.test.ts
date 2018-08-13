@@ -6,10 +6,10 @@ import * as mockery from 'mockery';
 import * as assert from 'assert';
 
 import * as testUtils from '../testUtils';
-import {ITargetDiscoveryStrategy} from '../../src/chrome/chromeConnection';
+import { ITargetDiscoveryStrategy } from '../../src/chrome/chromeConnection';
 
-import {NullLogger} from '../../src/nullLogger';
-import {NullTelemetryReporter} from '../../src/telemetry';
+import { NullLogger } from '../../src/nullLogger';
+import { NullTelemetryReporter } from '../../src/telemetry';
 
 const MODULE_UNDER_TEST = '../../src/chrome/chromeTargetDiscoveryStrategy';
 suite('ChromeTargetDiscoveryStrategy', () => {
@@ -33,7 +33,7 @@ suite('ChromeTargetDiscoveryStrategy', () => {
     const UTILS_PATH = '../utils';
     const TARGET_ADDRESS = '127.0.0.1';
     const TARGET_PORT = 9222;
-    const TARGET_LIST_URL = `http://${TARGET_ADDRESS}:${TARGET_PORT}/json`;
+    const TARGET_LIST_URL = `http://${TARGET_ADDRESS}:${TARGET_PORT}/json/list`;
 
     function registerTargetListContents(targetListJSON: string): void {
         testUtils.registerMockGetURL(UTILS_PATH, TARGET_LIST_URL, targetListJSON);
@@ -73,8 +73,8 @@ suite('ChromeTargetDiscoveryStrategy', () => {
                 }];
             registerTargetListContents(JSON.stringify(targets));
 
-            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT, target => target.url === targets[1].url).then(wsUrl => {
-                assert.deepEqual(wsUrl, targets[1].webSocketDebuggerUrl);
+            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT, target => target.url === targets[1].url).then(target => {
+                assert.deepEqual(target.webSocketDebuggerUrl, targets[1].webSocketDebuggerUrl);
             });
         });
 
@@ -120,8 +120,8 @@ suite('ChromeTargetDiscoveryStrategy', () => {
                 }];
             registerTargetListContents(JSON.stringify(targets));
 
-            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT, target => target.url === targets[1].url).then(wsUrl => {
-                assert.deepEqual(wsUrl, targets[1].webSocketDebuggerUrl);
+            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT, target => target.url === targets[1].url).then(target => {
+                assert.deepEqual(target.webSocketDebuggerUrl, targets[1].webSocketDebuggerUrl);
             });
         });
 
@@ -137,8 +137,8 @@ suite('ChromeTargetDiscoveryStrategy', () => {
                 }];
             registerTargetListContents(JSON.stringify(targets));
 
-            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT).then(wsUrl => {
-                assert.deepEqual(wsUrl, targets[0].webSocketDebuggerUrl);
+            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT).then(target => {
+                assert.deepEqual(target.webSocketDebuggerUrl, targets[0].webSocketDebuggerUrl);
             });
         });
 
@@ -155,8 +155,8 @@ suite('ChromeTargetDiscoveryStrategy', () => {
             registerTargetListContents(JSON.stringify(targets));
 
             const expectedWebSockerDebuggerUrl = `ws://${TARGET_ADDRESS}:${TARGET_PORT}`;
-            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT).then(wsUrl => {
-                assert.deepEqual(wsUrl, expectedWebSockerDebuggerUrl);
+            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT).then(target => {
+                assert.deepEqual(target.webSocketDebuggerUrl, expectedWebSockerDebuggerUrl);
             });
         });
 
@@ -173,8 +173,8 @@ suite('ChromeTargetDiscoveryStrategy', () => {
             registerTargetListContents(JSON.stringify(targets));
 
             const expectedWebSockerDebuggerUrl = `ws://${TARGET_ADDRESS}:${TARGET_PORT}/foo`;
-            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT).then(wsUrl => {
-                assert.deepEqual(wsUrl, expectedWebSockerDebuggerUrl);
+            return getChromeTargetDiscoveryStrategy().getTarget(TARGET_ADDRESS, TARGET_PORT).then(target => {
+                assert.deepEqual(target.webSocketDebuggerUrl, expectedWebSockerDebuggerUrl);
             });
         });
     });

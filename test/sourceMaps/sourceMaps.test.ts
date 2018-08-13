@@ -7,24 +7,27 @@ import * as mockery from 'mockery';
 import * as testUtils from '../testUtils';
 import * as path from 'path';
 
-import {fixDriveLetterAndSlashes} from '../../src/utils';
-import {SourceMaps} from '../../src/sourceMaps/sourceMaps';
-import {MappedPosition} from '../../src/sourceMaps/sourceMap';
+import { fixDriveLetterAndSlashes } from '../../src/utils';
+import { SourceMaps } from '../../src/sourceMaps/sourceMaps';
+import { MappedPosition } from '../../src/sourceMaps/sourceMap';
+import { utils } from '../../src';
 
 suite('SourceMaps', () => {
     // VSCode expects lowercase windows drive names
     const DIRNAME = fixDriveLetterAndSlashes(__dirname);
     const GENERATED_PATH = path.resolve(DIRNAME, 'testData/app.js');
-    const AUTHORED_PATH = path.resolve(DIRNAME, 'testData/source1.ts');
-    const ALL_SOURCES = [AUTHORED_PATH, path.resolve(DIRNAME, 'testData/source2.ts')];
+    const AUTHORED_PATH = utils.canonicalizeUrl(path.resolve(DIRNAME, 'testData/source1.ts'));
+    const ALL_SOURCES = [AUTHORED_PATH, utils.canonicalizeUrl(path.resolve(DIRNAME, 'testData/source2.ts'))];
     const WEBROOT = 'http://localhost';
+    const PATH_MAPPING = { '/': WEBROOT };
     const SOURCEMAP_URL = 'app.js.map';
-    const sourceMaps = new SourceMaps(WEBROOT);
+    const sourceMaps = new SourceMaps(PATH_MAPPING);
 
     setup((done) => {
         testUtils.setupUnhandledRejectionListener();
         mockery.enable({ warnOnReplace: false, useCleanCache: true, warnOnUnregistered: false });
         testUtils.registerWin32Mocks();
+        testUtils.registerLocMocks();
         sourceMaps.processNewSourceMap(GENERATED_PATH, SOURCEMAP_URL).then(done);
     });
 

@@ -6,25 +6,29 @@
  * This file contains extended forms of interfaces from vscode-debugprotocol
  */
 
-import {DebugProtocol} from 'vscode-debugprotocol';
-import Crdp from '../crdp/crdp';
+import { DebugProtocol } from 'vscode-debugprotocol';
+import { Protocol as Crdp } from 'devtools-protocol';
+import { ITelemetryPropertyCollector } from './telemetry';
+import { IStringDictionary } from './utils';
 
-export type ISourceMapPathOverrides = { [pattern: string]: string };
+export type ISourceMapPathOverrides = IStringDictionary<string>;
+export type IPathMapping = IStringDictionary<string>;
 
+export type BreakOnLoadStrategy = 'regex' | 'instrument' | 'off';
+
+export { ITelemetryPropertyCollector } from './telemetry';
 /**
  * Properties valid for both Launch and Attach
  */
 export interface ICommonRequestArgs {
-    webRoot?: string;
     remoteRoot?: string;
     localRoot?: string;
-    pathMapping?: {[url: string]: string};
+    pathMapping?: IPathMapping;
     outDir?: string;
     outFiles?: string[];
     sourceMaps?: boolean;
-    diagnosticLogging?: boolean;
-    verboseDiagnosticLogging?: boolean;
     trace?: boolean|string;
+    logFilePath?: string;
     sourceMapPathOverrides?: ISourceMapPathOverrides;
     smartStep?: boolean;
     skipFiles?: string[]; // an array of file names or glob patterns
@@ -34,6 +38,12 @@ export interface ICommonRequestArgs {
 
     /** Private undocumented property to multiplex the CRDP connection into an additional channel */
     extraCRDPChannelPort?: number;
+
+    _suppressConsoleOutput?: boolean;
+}
+
+export interface IInitializeRequestArgs extends DebugProtocol.InitializeRequestArguments {
+    supportsMapURLToFilePathRequest?: boolean;
 }
 
 export interface IRestartRequestArgs {
@@ -45,6 +55,9 @@ export interface IRestartRequestArgs {
  */
 export interface ILaunchRequestArgs extends DebugProtocol.LaunchRequestArguments, ICommonRequestArgs {
     __restart?: IRestartRequestArgs;
+
+    /** Private undocumented property for enabling break on load */
+    breakOnLoadStrategy?: BreakOnLoadStrategy;
 }
 
 export interface IAttachRequestArgs extends DebugProtocol.AttachRequestArguments, ICommonRequestArgs {
@@ -65,13 +78,7 @@ export interface ISetBreakpointsArgs extends DebugProtocol.SetBreakpointsArgumen
     authoredPath?: string;
 }
 
-/*
- * The ResponseBody interfaces are copied from debugProtocol.d.ts which defines these inline in the Response interfaces.
- * They should always match those interfaces, see the original for comments.
- */
-export interface ISetBreakpointsResponseBody {
-    breakpoints: DebugProtocol.Breakpoint[];
-}
+export type ISetBreakpointsResponseBody = DebugProtocol.SetBreakpointsResponse['body'];
 
 /**
  * Internal clone of the crdp version optional fields. If a created BP is in the same location as an existing BP,
@@ -84,76 +91,50 @@ export interface ISetBreakpointResult {
     actualLocation?: Crdp.Debugger.Location;
 }
 
-export interface ISourceResponseBody {
-    content: string;
-    mimeType?: string;
-}
+export type ISourceResponseBody = DebugProtocol.SourceResponse['body'];
 
-export interface IThreadsResponseBody {
-    threads: DebugProtocol.Thread[];
-}
+export type IThreadsResponseBody = DebugProtocol.ThreadsResponse['body'];
 
-export interface IStackTraceResponseBody {
-    stackFrames: DebugProtocol.StackFrame[];
-    totalFrames?: number;
+export type IStackTraceResponseBody = DebugProtocol.StackTraceResponse['body'];
+
+export interface IInternalStackTraceResponseBody extends IStackTraceResponseBody {
+    stackFrames: IInternalStackFrame[];
 }
 
 export interface IInternalStackFrame extends DebugProtocol.StackFrame {
     isSourceMapped?: boolean;
 }
 
-export interface IInternalStackTraceResponseBody extends IStackTraceResponseBody {
-    stackFrames: IInternalStackFrame[];
+export type IScopesResponseBody = DebugProtocol.ScopesResponse['body'];
+
+export type IVariablesResponseBody = DebugProtocol.VariablesResponse['body'];
+
+export type IEvaluateResponseBody = DebugProtocol.EvaluateResponse['body'];
+
+export type ISetVariableResponseBody = DebugProtocol.SetVariableResponse['body'];
+
+export type ICompletionsResponseBody = DebugProtocol.CompletionsResponse['body'];
+
+export type IGetLoadedSourcesResponseBody = DebugProtocol.LoadedSourcesResponse['body'];
+
+export interface IExceptionDetailsVS extends DebugProtocol.ExceptionDetails {
+    /** A VS-specific property */
+    formattedDescription?: string;
 }
 
-export interface IScopesResponseBody {
-    scopes: DebugProtocol.Scope[];
+type DAPExceptionInfoResponseBody = DebugProtocol.ExceptionInfoResponse['body'];
+export interface IExceptionInfoResponseBody extends DAPExceptionInfoResponseBody {
+    details?: IExceptionDetailsVS;
 }
 
-export interface IVariablesResponseBody {
-    variables: DebugProtocol.Variable[];
-}
-
-export interface IEvaluateResponseBody {
-    result: string;
-    type?: string;
-    variablesReference: number;
-    namedVariables?: number;
-    indexedVariables?: number;
-}
-
-export interface ISetVariableResponseBody {
-    value: string;
-}
-
-export interface ICompletionsResponseBody {
-    /** The possible completions for . */
-    targets: DebugProtocol.CompletionItem[];
-}
-
-export interface IAllLoadedScriptsResponseBody {
-    paths: string[];
-}
-
-export interface IExceptionInfoResponseBody {
-    /** ID of the exception that was thrown. */
-    exceptionId: string;
-    /** Descriptive text for the exception provided by the debug adapter. */
-    description?: string;
-    /** Mode that caused the exception notification to be raised. */
-    breakMode: DebugProtocol.ExceptionBreakMode;
-    /** Detailed information about the exception. */
-    details?: DebugProtocol.ExceptionDetails;
-}
-
-declare type PromiseOrNot<T> = T | Promise<T>;
+export declare type PromiseOrNot<T> = T | Promise<T>;
 
 export interface TimeTravelClient {
     stepBack(): Promise<any>;
     reverse(): Promise<any>;
 }
 
-export interface TimeTravelRuntime extends Crdp.CrdpClient {
+export interface TimeTravelRuntime extends Crdp.ProtocolApi {
     TimeTravel: TimeTravelClient;
 }
 
@@ -165,12 +146,12 @@ export interface IDebugAdapter {
     // From DebugSession
     shutdown(): void;
 
-    initialize(args: DebugProtocol.InitializeRequestArguments, requestSeq?: number): PromiseOrNot<DebugProtocol.Capabilities>;
-    launch(args: ILaunchRequestArgs, requestSeq?: number): PromiseOrNot<void>;
-    attach(args: IAttachRequestArgs, requestSeq?: number): PromiseOrNot<void>;
+    initialize(args: DebugProtocol.InitializeRequestArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<DebugProtocol.Capabilities>;
+    launch(args: ILaunchRequestArgs, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<void>;
+    attach(args: IAttachRequestArgs, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<void>;
     disconnect(args: DebugProtocol.DisconnectArguments): PromiseOrNot<void>;
-    setBreakpoints(args: DebugProtocol.SetBreakpointsArguments, requestSeq?: number): PromiseOrNot<ISetBreakpointsResponseBody>;
-    setExceptionBreakpoints(args: DebugProtocol.SetExceptionBreakpointsArguments, requestSeq?: number): PromiseOrNot<void>;
+    setBreakpoints(args: DebugProtocol.SetBreakpointsArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<ISetBreakpointsResponseBody>;
+    setExceptionBreakpoints(args: DebugProtocol.SetExceptionBreakpointsArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<void>;
     configurationDone(): PromiseOrNot<void>;
 
     continue(): PromiseOrNot<void>;
@@ -179,19 +160,19 @@ export interface IDebugAdapter {
     stepOut(): PromiseOrNot<void>;
     pause(): PromiseOrNot<void>;
 
-    stackTrace(args: DebugProtocol.StackTraceArguments, requestSeq?: number): PromiseOrNot<IStackTraceResponseBody>;
-    scopes(args: DebugProtocol.ScopesArguments, requestSeq?: number): PromiseOrNot<IScopesResponseBody>;
-    variables(args: DebugProtocol.VariablesArguments, requestSeq?: number): PromiseOrNot<IVariablesResponseBody>;
-    source(args: DebugProtocol.SourceArguments, requestSeq?: number): PromiseOrNot<ISourceResponseBody>;
+    stackTrace(args: DebugProtocol.StackTraceArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<IStackTraceResponseBody>;
+    scopes(args: DebugProtocol.ScopesArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<IScopesResponseBody>;
+    variables(args: DebugProtocol.VariablesArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<IVariablesResponseBody>;
+    source(args: DebugProtocol.SourceArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<ISourceResponseBody>;
     threads(): PromiseOrNot<IThreadsResponseBody>;
-    evaluate(args: DebugProtocol.EvaluateArguments, requestSeq?: number): PromiseOrNot<IEvaluateResponseBody>;
+    evaluate(args: DebugProtocol.EvaluateArguments, telemetryPropertyCollector?: ITelemetryPropertyCollector, requestSeq?: number): PromiseOrNot<IEvaluateResponseBody>;
 }
 
 export interface IDebugTransformer {
     initialize?(args: DebugProtocol.InitializeRequestArguments, requestSeq?: number): PromiseOrNot<void>;
     launch?(args: ILaunchRequestArgs, requestSeq?: number): PromiseOrNot<void>;
     attach?(args: IAttachRequestArgs, requestSeq?: number): PromiseOrNot<void>;
-    setBreakpoints?(args: DebugProtocol.SetBreakpointsArguments, requestSeq?: number): PromiseOrNot<void>;
+    setBreakpoints?(args: DebugProtocol.SetBreakpointsArguments, requestSeq?: number): PromiseOrNot<DebugProtocol.SetBreakpointsArguments>;
     setExceptionBreakpoints?(args: DebugProtocol.SetExceptionBreakpointsArguments, requestSeq?: number): PromiseOrNot<void>;
 
     stackTrace?(args: DebugProtocol.StackTraceArguments, requestSeq?: number): PromiseOrNot<void>;

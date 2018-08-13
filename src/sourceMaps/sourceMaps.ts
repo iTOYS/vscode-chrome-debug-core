@@ -2,23 +2,19 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {SourceMap, MappedPosition, ISourcePathDetails} from './sourceMap';
-import {getMapForGeneratedPath} from './sourceMapFactory';
-import {ISourceMapPathOverrides} from '../debugAdapterInterfaces';
+import { SourceMap, MappedPosition, ISourcePathDetails } from './sourceMap';
+import { SourceMapFactory } from './sourceMapFactory';
+import { ISourceMapPathOverrides, IPathMapping } from '../debugAdapterInterfaces';
 
 export class SourceMaps {
     // Maps absolute paths to generated/authored source files to their corresponding SourceMap object
     private _generatedPathToSourceMap = new Map<string, SourceMap>();
     private _authoredPathToSourceMap = new Map<string, SourceMap>();
 
-    // Path to resolve / paths against
-    private _webRoot: string;
+    private _sourceMapFactory: SourceMapFactory;
 
-    private _sourceMapPathOverrides: ISourceMapPathOverrides;
-
-    public constructor(webRoot?: string, sourceMapPathOverrides?: ISourceMapPathOverrides) {
-        this._webRoot = webRoot;
-        this._sourceMapPathOverrides = sourceMapPathOverrides;
+    public constructor(pathMapping?: IPathMapping, sourceMapPathOverrides?: ISourceMapPathOverrides, enableSourceMapCaching?: boolean) {
+        this._sourceMapFactory = new SourceMapFactory(pathMapping, sourceMapPathOverrides, enableSourceMapCaching);
     }
 
     /**
@@ -73,12 +69,11 @@ export class SourceMaps {
     /**
      * Given a new path to a new script file, finds and loads the sourcemap for that file
      */
-    public processNewSourceMap(pathToGenerated: string, sourceMapURL: string): Promise<void> {
-        return getMapForGeneratedPath(pathToGenerated, sourceMapURL, this._webRoot, this._sourceMapPathOverrides).then(sourceMap => {
-            if (sourceMap) {
-                this._generatedPathToSourceMap.set(pathToGenerated.toLowerCase(), sourceMap);
-                sourceMap.authoredSources.forEach(authoredSource => this._authoredPathToSourceMap.set(authoredSource.toLowerCase(), sourceMap));
-            }
-        });
+    public async processNewSourceMap(pathToGenerated: string, sourceMapURL: string, isVSClient = false): Promise<void> {
+        const sourceMap = await this._sourceMapFactory.getMapForGeneratedPath(pathToGenerated, sourceMapURL, isVSClient);
+        if (sourceMap) {
+            this._generatedPathToSourceMap.set(pathToGenerated.toLowerCase(), sourceMap);
+            sourceMap.authoredSources.forEach(authoredSource => this._authoredPathToSourceMap.set(authoredSource.toLowerCase(), sourceMap));
+        }
     }
 }

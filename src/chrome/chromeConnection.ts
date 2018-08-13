@@ -4,18 +4,19 @@
 
 import * as WebSocket from 'ws';
 
-import {telemetry} from '../telemetry';
+import { telemetry } from '../telemetry';
+import { StepProgressEventsEmitter, IObservableEvents, IStepStartedEventsEmitter } from '../executionTimingsReporter';
 import * as errors from '../errors';
 import * as utils from '../utils';
-import {logger} from 'vscode-debugadapter';
-import {ChromeTargetDiscovery} from './chromeTargetDiscoveryStrategy';
+import { logger } from 'vscode-debugadapter';
+import { ChromeTargetDiscovery } from './chromeTargetDiscoveryStrategy';
 
-import {Client, LikeSocket} from 'noice-json-rpc';
+import { Client, LikeSocket } from 'noice-json-rpc';
 
-import Crdp from '../../crdp/crdp';
+import { Protocol as Crdp } from 'devtools-protocol';
 
-import {CRDPMultiplexor} from './crdpMultiplexing/crdpMultiplexor';
-import {WebSocketToLikeSocketProxy} from './crdpMultiplexing/webSocketToLikeSocketProxy';
+import { CRDPMultiplexor } from './crdpMultiplexing/crdpMultiplexor';
+import { WebSocketToLikeSocketProxy } from './crdpMultiplexing/webSocketToLikeSocketProxy';
 
 export interface ITarget {
     description: string;
@@ -30,7 +31,7 @@ export interface ITarget {
 
 export type ITargetFilter = (target: ITarget) => boolean;
 export interface ITargetDiscoveryStrategy {
-    getTarget(address: string, port: number, targetFilter?: ITargetFilter, targetUrl?: string): Promise<string>;
+    getTarget(address: string, port: number, targetFilter?: ITargetFilter, targetUrl?: string): Promise<ITarget>;
     getAllTargets(address: string, port: number, targetFilter?: ITargetFilter, targetUrl?: string): Promise<ITarget[]>;
 }
 
@@ -65,10 +66,14 @@ class LoggingSocket extends WebSocket {
         });
     }
 
-    public send(data: any, cb?: (err: Error) => void): void {
-        super.send.apply(this, arguments);
-
+    public send(data: any, opts?: any, cb?: (err: Error) => void): void {
         const msgStr = JSON.stringify(data);
+        if (this.readyState !== WebSocket.OPEN) {
+            logger.log(`→ Warning: Target not open! Message: ${msgStr}`);
+            return;
+        }
+
+        super.send.apply(this, arguments);
         logger.verbose('→ To target: ' + msgStr);
     }
 }
@@ -82,24 +87,31 @@ export interface IChromeError {
 /**
  * Connects to a target supporting the Chrome Debug Protocol and sends and receives messages
  */
-export class ChromeConnection {
+export class ChromeConnection implements IObservableEvents<IStepStartedEventsEmitter> {
     private static ATTACH_TIMEOUT = 10000; // ms
 
     private _socket: WebSocket;
     private _crdpSocketMultiplexor: CRDPMultiplexor;
     private _client: Client;
     private _targetFilter: ITargetFilter;
-    private _targetDiscoveryStrategy: ITargetDiscoveryStrategy;
+    private _targetDiscoveryStrategy: ITargetDiscoveryStrategy & IObservableEvents<IStepStartedEventsEmitter>;
+    private _attachedTarget: ITarget;
+    public readonly events: StepProgressEventsEmitter;
 
-    constructor(targetDiscovery?: ITargetDiscoveryStrategy, targetFilter?: ITargetFilter) {
+    constructor(targetDiscovery?: ITargetDiscoveryStrategy & IObservableEvents<IStepStartedEventsEmitter>, targetFilter?: ITargetFilter) {
         this._targetFilter = targetFilter;
         this._targetDiscoveryStrategy = targetDiscovery || new ChromeTargetDiscovery(logger, telemetry);
+        this.events = new StepProgressEventsEmitter([this._targetDiscoveryStrategy.events]);
     }
 
     public get isAttached(): boolean { return !!this._client; }
 
-    public get api(): Crdp.CrdpClient {
+    public get api(): Crdp.ProtocolApi {
         return this._client && this._client.api();
+    }
+
+    public get attachedTarget(): ITarget {
+        return this._attachedTarget;
     }
 
     /**
@@ -111,7 +123,13 @@ export class ChromeConnection {
     }
 
     public attachToWebsocketUrl(wsUrl: string, extraCRDPChannelPort?: number): void {
-        this._socket = new LoggingSocket(wsUrl);
+        /* __GDPR__FRAGMENT__
+           "StepNames" : {
+              "Attach.AttachToTargetDebuggerWebsocket" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+           }
+         */
+        this.events.emitStepStarted('Attach.AttachToTargetDebuggerWebsocket');
+        this._socket = new LoggingSocket(wsUrl, undefined, { headers: { Host: 'localhost' }});
         if (extraCRDPChannelPort) {
             this._crdpSocketMultiplexor = new CRDPMultiplexor(this._socket as any as LikeSocket);
             new WebSocketToLikeSocketProxy(extraCRDPChannelPort, this._crdpSocketMultiplexor.addChannel('extraCRDPEndpoint')).start();
@@ -123,11 +141,19 @@ export class ChromeConnection {
         this._client.on('error', e => logger.error('Error handling message from target: ' + e.message));
     }
 
+    public getAllTargets(address = '127.0.0.1', port = 9222, targetFilter?: ITargetFilter, targetUrl?: string): Promise<ITarget[]> {
+        return this._targetDiscoveryStrategy.getAllTargets(address, port, targetFilter, targetUrl);
+    }
+
     private _attach(address: string, port: number, targetUrl?: string, timeout = ChromeConnection.ATTACH_TIMEOUT, extraCRDPChannelPort?: number): Promise<void> {
+        let selectedTarget: ITarget;
         return utils.retryAsync(() => this._targetDiscoveryStrategy.getTarget(address, port, this._targetFilter, targetUrl), timeout, /*intervalDelay=*/200)
             .catch(err => Promise.reject(errors.runtimeConnectionTimeout(timeout, err.message)))
-            .then(wsUrl => {
-                return this.attachToWebsocketUrl(wsUrl, extraCRDPChannelPort);
+            .then(target => {
+                selectedTarget = target;
+                return this.attachToWebsocketUrl(target.webSocketDebuggerUrl, extraCRDPChannelPort);
+            }).then(() => {
+                this._attachedTarget = selectedTarget;
             });
     }
 

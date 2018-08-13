@@ -2,10 +2,10 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {DebugProtocol} from 'vscode-debugprotocol';
+import { DebugProtocol } from 'vscode-debugprotocol';
 
-import {ChromeDebugSession} from '../chrome/chromeDebugSession';
-import {IDebugTransformer, ISetBreakpointsResponseBody, IStackTraceResponseBody, IScopesResponseBody} from '../debugAdapterInterfaces';
+import { ChromeDebugSession } from '../chrome/chromeDebugSession';
+import { IDebugTransformer, ISetBreakpointsResponseBody, IStackTraceResponseBody, IScopesResponseBody } from '../debugAdapterInterfaces';
 
 /**
  * Converts from 1 based lines/cols on the client side to 0 based lines/cols on the target side
@@ -16,11 +16,13 @@ export class LineColTransformer implements IDebugTransformer  {
     constructor(private _session: ChromeDebugSession) {
     }
 
-    public setBreakpoints(args: DebugProtocol.SetBreakpointsArguments): void {
+    public setBreakpoints(args: DebugProtocol.SetBreakpointsArguments): DebugProtocol.SetBreakpointsArguments {
         args.breakpoints.forEach(bp => this.convertClientLocationToDebugger(bp));
         if (!this.columnBreakpointsEnabled) {
             args.breakpoints.forEach(bp => bp.column = undefined);
         }
+
+        return args;
     }
 
     public setBreakpointsResponse(response: ISetBreakpointsResponseBody): void {
@@ -60,7 +62,7 @@ export class LineColTransformer implements IDebugTransformer  {
         }
     }
 
-    private convertClientLocationToDebugger(location: { line?: number; column?: number }): void {
+    public convertClientLocationToDebugger(location: { line?: number; column?: number }): void {
         if (typeof location.line === 'number') {
             location.line = this.convertClientLineToDebugger(location.line);
         }
@@ -70,7 +72,7 @@ export class LineColTransformer implements IDebugTransformer  {
         }
     }
 
-    private convertDebuggerLocationToClient(location: { line?: number; column?: number }): void {
+    public convertDebuggerLocationToClient(location: { line?: number; column?: number }): void {
         if (typeof location.line === 'number') {
             location.line = this.convertDebuggerLineToClient(location.line);
         }
@@ -80,20 +82,19 @@ export class LineColTransformer implements IDebugTransformer  {
         }
     }
 
-    // Should be stable but ...
-    private convertClientLineToDebugger(line: number): number {
+    public convertClientLineToDebugger(line: number): number {
         return (<any>this._session).convertClientLineToDebugger(line);
     }
 
-    private convertDebuggerLineToClient(line: number): number {
+    public convertDebuggerLineToClient(line: number): number {
         return (<any>this._session).convertDebuggerLineToClient(line);
     }
 
-    private convertClientColumnToDebugger(column: number): number {
+    public convertClientColumnToDebugger(column: number): number {
         return (<any>this._session).convertClientColumnToDebugger(column);
     }
 
-    private convertDebuggerColumnToClient(column: number): number {
+    public convertDebuggerColumnToClient(column: number): number {
         return (<any>this._session).convertDebuggerColumnToClient(column);
     }
 }

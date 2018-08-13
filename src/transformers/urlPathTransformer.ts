@@ -2,13 +2,13 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {BasePathTransformer} from './basePathTransformer';
+import { BasePathTransformer } from './basePathTransformer';
 
-import {ISetBreakpointsArgs, ILaunchRequestArgs, IAttachRequestArgs, IStackTraceResponseBody} from '../debugAdapterInterfaces';
+import { ISetBreakpointsArgs, ILaunchRequestArgs, IAttachRequestArgs, IStackTraceResponseBody, IPathMapping } from '../debugAdapterInterfaces';
 import * as utils from '../utils';
-import {logger} from 'vscode-debugadapter';
+import { logger } from 'vscode-debugadapter';
+import { DebugProtocol } from 'vscode-debugprotocol';
 import * as ChromeUtils from '../chrome/chromeUtils';
-import {ChromeDebugAdapter} from '../chrome/chromeDebugAdapter';
 
 import * as path from 'path';
 
@@ -16,33 +16,30 @@ import * as path from 'path';
  * Converts a local path from Code to a path on the target.
  */
 export class UrlPathTransformer extends BasePathTransformer {
-    private _webRoot: string;
-    private _pathMapping: {[url: string]: string} = {};
+    private _pathMapping: IPathMapping;
     private _clientPathToTargetUrl = new Map<string, string>();
     private _targetUrlToClientPath = new Map<string, string>();
 
     public launch(args: ILaunchRequestArgs): Promise<void> {
-        this._webRoot = args.webRoot;
-        this._pathMapping = args.pathMapping || {};
+        this._pathMapping = args.pathMapping;
         return super.launch(args);
     }
 
     public attach(args: IAttachRequestArgs): Promise<void> {
-        this._webRoot = args.webRoot;
-        this._pathMapping = args.pathMapping || {};
+        this._pathMapping = args.pathMapping;
         return super.attach(args);
     }
 
-    public setBreakpoints(args: ISetBreakpointsArgs): void {
+    public setBreakpoints(args: ISetBreakpointsArgs): ISetBreakpointsArgs {
         if (!args.source.path) {
             // sourceReference script, nothing to do
-            return;
+            return args;
         }
 
         if (utils.isURL(args.source.path)) {
             // already a url, use as-is
             logger.log(`Paths.setBP: ${args.source.path} is already a URL`);
-            return;
+            return args;
         }
 
         const path = utils.canonicalizeUrl(args.source.path);
@@ -50,11 +47,11 @@ export class UrlPathTransformer extends BasePathTransformer {
         if (url) {
             args.source.path = url;
             logger.log(`Paths.setBP: Resolved ${path} to ${args.source.path}`);
-            return;
+            return args;
         } else {
             logger.log(`Paths.setBP: No target url cached yet for client path: ${path}.`);
             args.source.path = path;
-            return;
+            return args;
         }
     }
 
@@ -63,46 +60,46 @@ export class UrlPathTransformer extends BasePathTransformer {
         this._targetUrlToClientPath = new Map<string, string>();
     }
 
-    public scriptParsed(scriptUrl: string): string {
-        let clientPath = ChromeUtils.targetUrlToClientPathByPathMappings(scriptUrl, this._pathMapping);
-
-        if (!clientPath) {
-            clientPath = ChromeUtils.targetUrlToClientPath(this._webRoot, scriptUrl);
-        }
+    public async scriptParsed(scriptUrl: string): Promise<string> {
+        const clientPath = await this.targetUrlToClientPath(scriptUrl);
 
         if (!clientPath) {
             // It's expected that eval scripts (eval://) won't be resolved
-            if (!scriptUrl.startsWith(ChromeDebugAdapter.EVAL_NAME_PREFIX)) {
-                logger.log(`Paths.scriptParsed: could not resolve ${scriptUrl} to a file under webRoot: ${this._webRoot}. It may be external or served directly from the server's memory (and that's OK).`);
+            if (!scriptUrl.startsWith(ChromeUtils.EVAL_NAME_PREFIX)) {
+                logger.log(`Paths.scriptParsed: could not resolve ${scriptUrl} to a file with pathMapping/webRoot: ${JSON.stringify(this._pathMapping)}. It may be external or served directly from the server's memory (and that's OK).`);
             }
         } else {
-            logger.log(`Paths.scriptParsed: resolved ${scriptUrl} to ${clientPath}. webRoot: ${this._webRoot}`);
-            this._clientPathToTargetUrl.set(clientPath, scriptUrl);
+            logger.log(`Paths.scriptParsed: resolved ${scriptUrl} to ${clientPath}. pathMapping/webroot: ${JSON.stringify(this._pathMapping)}`);
+            const canonicalizedClientPath = utils.canonicalizeUrl(clientPath);
+            this._clientPathToTargetUrl.set(canonicalizedClientPath, scriptUrl);
             this._targetUrlToClientPath.set(scriptUrl, clientPath);
 
             scriptUrl = clientPath;
         }
 
-        return scriptUrl;
+        return Promise.resolve(scriptUrl);
     }
 
-    public stackTraceResponse(response: IStackTraceResponseBody): void {
-        response.stackFrames.forEach(frame => {
-            if (frame.source && frame.source.path) {
-                // Try to resolve the url to a path in the workspace. If it's not in the workspace,
-                // just use the script.url as-is. It will be resolved or cleared by the SourceMapTransformer.
-                const clientPath = this.getClientPathFromTargetPath(frame.source.path) ||
-                    ChromeUtils.targetUrlToClientPath(this._webRoot, frame.source.path);
+    public async stackTraceResponse(response: IStackTraceResponseBody): Promise<void> {
+        await Promise.all(response.stackFrames.map(frame => this.fixSource(frame.source)));
+    }
 
-                // Incoming stackFrames have sourceReference and path set. If the path was resolved to a file in the workspace,
-                // clear the sourceReference since it's not needed.
-                if (clientPath) {
-                    frame.source.path = clientPath;
-                    frame.source.sourceReference = undefined;
-                    frame.source.origin = undefined;
-                }
+    public async fixSource(source: DebugProtocol.Source): Promise<void> {
+        if (source && source.path) {
+            // Try to resolve the url to a path in the workspace. If it's not in the workspace,
+            // just use the script.url as-is. It will be resolved or cleared by the SourceMapTransformer.
+            const clientPath = this.getClientPathFromTargetPath(source.path) ||
+                await this.targetUrlToClientPath(source.path);
+
+            // Incoming stackFrames have sourceReference and path set. If the path was resolved to a file in the workspace,
+            // clear the sourceReference since it's not needed.
+            if (clientPath) {
+                source.path = clientPath;
+                source.sourceReference = undefined;
+                source.origin = undefined;
+                source.name = path.basename(clientPath);
             }
-        });
+        }
     }
 
     public getTargetPathFromClientPath(clientPath: string): string {
@@ -114,5 +111,12 @@ export class UrlPathTransformer extends BasePathTransformer {
 
     public getClientPathFromTargetPath(targetPath: string): string {
         return this._targetUrlToClientPath.get(targetPath);
+    }
+
+    /**
+     * Overridable for VS to ask Client to resolve path
+     */
+    protected async targetUrlToClientPath(scriptUrl: string): Promise<string> {
+        return Promise.resolve(ChromeUtils.targetUrlToClientPath(scriptUrl, this._pathMapping));
     }
 }

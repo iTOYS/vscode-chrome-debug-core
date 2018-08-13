@@ -2,7 +2,7 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import Crdp from '../../crdp/crdp';
+import { Protocol as Crdp } from 'devtools-protocol';
 import * as variables from './variables';
 
 export function formatExceptionDetails(e: Crdp.Runtime.ExceptionDetails): string {
@@ -56,6 +56,11 @@ export function formatConsoleArguments(m: Crdp.Runtime.ConsoleAPICalledEvent): {
         case 'trace':
             args = [{ type: 'string', value: 'console.trace()\n' + stackTraceToString(m.stackTrace) }];
             break;
+        // case 'clear':
+        // Microsoft/vscode-debugadapter-node#185
+        // Needs https://github.com/Microsoft/vscode/issues/51245 and https://github.com/Microsoft/vscode/issues/51246
+        //     args = [{ type: 'string', value: '\u001b[2J' }];
+        //     break;
         default:
             // Some types we have to ignore
             return null;
@@ -66,7 +71,7 @@ export function formatConsoleArguments(m: Crdp.Runtime.ConsoleAPICalledEvent): {
 }
 
 /**
- * Collapse leading non-object arguments, and apply format specifiers (%s, %d, etc)
+ * Collapse non-object arguments, and apply format specifiers (%s, %d, etc). Return a reduced a formatted list of RemoteObjects.
  */
 function resolveParams(m: Crdp.Runtime.ConsoleAPICalledEvent, skipFormatSpecifiers?: boolean): Crdp.Runtime.RemoteObject[] {
     if (!m.args.length || m.args[0].objectId) {
@@ -77,56 +82,89 @@ function resolveParams(m: Crdp.Runtime.ConsoleAPICalledEvent, skipFormatSpecifie
     // Find all %s, %i, etc in the first argument, which is always the main text. Strip %
     let formatSpecifiers: string[];
     const firstTextArg = m.args.shift();
-    let firstTextArgValue = firstTextArg.value + '';
+
+    // currentCollapsedStringArg is the accumulated text
+    let currentCollapsedStringArg = variables.getRemoteObjectPreview(firstTextArg, /*stringify=*/false) + '';
     if (firstTextArg.type === 'string' && !skipFormatSpecifiers) {
-        formatSpecifiers = (firstTextArgValue.match(/\%[sidfoOc]/g) || [])
+        formatSpecifiers = (currentCollapsedStringArg.match(/\%[sidfoOc]/g) || [])
             .map(spec => spec[1]);
     } else {
         formatSpecifiers = [];
     }
 
-    // Collapse all text parameters, formatting properly if there's a format specifier
-    let collapsedArgIdx = 0;
-    for (; collapsedArgIdx < m.args.length; collapsedArgIdx++) {
-        const param = m.args[collapsedArgIdx];
-        if (param.objectId && !formatSpecifiers.length) {
-            // If the next arg is an object, and we're done consuming format specifiers, quit
-            break;
+    const processedArgs: Crdp.Runtime.RemoteObject[] = [];
+    const pushStringArg = (strArg: string) => {
+        if (typeof strArg === 'string') {
+            processedArgs.push({ type: 'string', value: strArg });
         }
+    };
+
+    // Collapse all text parameters, formatting properly if there's a format specifier
+    for (let argIdx = 0; argIdx < m.args.length; argIdx++) {
+        const arg = m.args[argIdx];
 
         const formatSpec = formatSpecifiers.shift();
-        let formatted: string;
-        const paramValue = typeof param.value !== 'undefined' ? param.value : param.description;
-        if (formatSpec === 's') {
-            formatted = paramValue;
-        } else if (['i', 'd'].indexOf(formatSpec) >= 0) {
-            formatted = Math.floor(+paramValue) + '';
-        } else if (formatSpec === 'f') {
-            formatted = +paramValue + '';
-        } else if (formatSpec === 'c') {
-            // %c - Applies CSS color rules
-            // Could use terminal color codes in the future
-            formatted = '';
-        } else if (['o', 'O'].indexOf(formatSpec) >= 0) {
-            // Not supported -
-            // %o - expandable DOM element
-            // %O - expandable JS object
-            formatted = paramValue;
-        }
+        const formatted = formatArg(formatSpec, arg);
 
-        // If this param had a format specifier, search and replace it with the formatted param.
-        // Otherwise, append it to the end of the text
-        if (formatSpec) {
-            firstTextArgValue = firstTextArgValue.replace('%' + formatSpec, formatted);
+        currentCollapsedStringArg = currentCollapsedStringArg || '';
+
+        if (typeof formatted === 'string') {
+            if (formatSpec) {
+                // If this param had a format specifier, search and replace it with the formatted param.
+                currentCollapsedStringArg = currentCollapsedStringArg.replace('%' + formatSpec, formatted);
+            } else {
+                currentCollapsedStringArg += (currentCollapsedStringArg ? ' ' + formatted : formatted);
+            }
+        } else if (formatSpec) {
+            // `formatted` is an object - split currentCollapsedStringArg around the current formatSpec and add the object
+            const curSpecIdx = currentCollapsedStringArg.indexOf('%' + formatSpec);
+            const processedPart = currentCollapsedStringArg.slice(0, curSpecIdx);
+            if (processedPart) {
+                pushStringArg(processedPart);
+            }
+
+            currentCollapsedStringArg = currentCollapsedStringArg.slice(curSpecIdx + 2);
+            processedArgs.push(formatted);
         } else {
-            firstTextArgValue += ' ' + param.value;
+            pushStringArg(currentCollapsedStringArg);
+            currentCollapsedStringArg = null;
+            processedArgs.push(formatted);
         }
     }
 
-    // Return the collapsed text argument, with all others left alone
-    const newFormattedTextArg: Crdp.Runtime.RemoteObject = { type: 'string', value: firstTextArgValue };
-    const otherArgs = m.args.slice(collapsedArgIdx);
-    return [newFormattedTextArg, ...otherArgs];
+    pushStringArg(currentCollapsedStringArg);
+
+    return processedArgs;
+}
+
+function formatArg(formatSpec: string, arg: Crdp.Runtime.RemoteObject): string | Crdp.Runtime.RemoteObject {
+    const paramValue = String(typeof arg.value !== 'undefined' ? arg.value : arg.description);
+
+    if (formatSpec === 's') {
+        return paramValue;
+    } else if (['i', 'd'].indexOf(formatSpec) >= 0) {
+        return Math.floor(+paramValue) + '';
+    } else if (formatSpec === 'f') {
+        return +paramValue + '';
+    } else if (formatSpec === 'c') {
+        // Remove %c - Applies CSS color rules
+        // Could use terminal color codes in the future
+        return '';
+    } else if (formatSpec === 'O') {
+        if (arg.objectId) {
+            return arg;
+        } else {
+            return paramValue;
+        }
+    } else {
+        // No formatSpec, or unsupported formatSpec:
+        // %o - expandable DOM element
+        if (arg.objectId) {
+            return arg;
+        } else {
+            return paramValue;
+        }
+    }
 }
 
 function stackTraceToString(stackTrace: Crdp.Runtime.StackTrace): string {

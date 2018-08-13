@@ -3,7 +3,7 @@
  *--------------------------------------------------------*/
 
 import * as assert from 'assert';
-import Crdp from '../../crdp/crdp';
+import { Protocol as Crdp } from 'devtools-protocol';
 
 import * as Variables from '../../src/chrome/variables';
 
@@ -52,7 +52,7 @@ suite('Variables', () => {
         });
 
         test('one-item array', () => {
-            testArrayPreview(["hi"], 'Array[1] ["hi"]');
+            testArrayPreview(['hi'], 'Array[1] ["hi"]');
         });
 
         test('short array', () => {

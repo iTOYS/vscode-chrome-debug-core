@@ -6,6 +6,7 @@
 {
 	"exceptions.all": "Tüm İstisnalar",
 	"exceptions.uncaught": "Yakalanmamış İstisnalar",
+	"exceptions.promise_rejects": "Promise Retleri",
 	"setBPTimedOut": "Kesme noktaları ayarlama isteği zaman aşımına uğradı",
 	"bp.fail.noscript": "Kesme noktası isteği için betik bulunamıyor",
 	"validateBP.sourcemapFail": "Kesme noktası görmezden gelindi çünkü oluşturulan kod bulunamadı (kaynak haritası problemi olabilir).",

@@ -7,6 +7,7 @@ import * as mocha from 'mocha';
 import * as events from 'events';
 
 class LoggingReporter extends mocha.reporters.Spec {
+    static alwaysDumpLogs = false;
     static logEE = new events.EventEmitter();
 
     private testLogs: string[];
@@ -28,15 +29,23 @@ class LoggingReporter extends mocha.reporters.Spec {
 
         runner.on('pass', test => {
             this.inTest = false;
+
+            if (LoggingReporter.alwaysDumpLogs) {
+                this.dumpLogs();
+            }
         });
 
         runner.on('fail', test => {
             this.inTest = false;
-            this.testLogs.forEach(msg => {
-                console.log(msg);
-            });
+            this.dumpLogs();
 
             console.log(new Date().toISOString().split(/[TZ]/)[1] + ' Finished');
+        });
+    }
+
+    private dumpLogs(): void {
+        this.testLogs.forEach(msg => {
+            console.log(msg);
         });
     }
 }

@@ -2,9 +2,9 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {DebugProtocol} from 'vscode-debugprotocol';
+import { DebugProtocol } from 'vscode-debugprotocol';
 
-import {ISetBreakpointsArgs, ILaunchRequestArgs, IAttachRequestArgs, IStackTraceResponseBody} from '../debugAdapterInterfaces';
+import { ISetBreakpointsArgs, ILaunchRequestArgs, IAttachRequestArgs, IStackTraceResponseBody } from '../debugAdapterInterfaces';
 
 /**
  * Converts a local path from Code to a path on the target.
@@ -18,14 +18,15 @@ export class BasePathTransformer {
         return Promise.resolve();
     }
 
-    public setBreakpoints(args: ISetBreakpointsArgs): void {
+    public setBreakpoints(args: ISetBreakpointsArgs): ISetBreakpointsArgs {
+        return args;
     }
 
     public clearTargetContext(): void {
     }
 
-    public scriptParsed(scriptPath: string): string {
-        return scriptPath;
+    public scriptParsed(scriptPath: string): Promise<string> {
+        return Promise.resolve(scriptPath);
     }
 
     public breakpointResolved(bp: DebugProtocol.Breakpoint, targetPath: string): string {
@@ -33,6 +34,9 @@ export class BasePathTransformer {
     }
 
     public stackTraceResponse(response: IStackTraceResponseBody): void {
+    }
+
+    public async fixSource(source: DebugProtocol.Source): Promise<void> {
     }
 
     public getTargetPathFromClientPath(clientPath: string): string {

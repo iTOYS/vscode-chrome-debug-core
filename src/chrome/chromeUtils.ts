@@ -4,81 +4,86 @@
 
 import * as url from 'url';
 import * as path from 'path';
-import Crdp from '../../crdp/crdp';
+import { Protocol as Crdp } from 'devtools-protocol';
+import { logger } from 'vscode-debugadapter';
 
 import * as utils from '../utils';
-import {ITarget} from './chromeConnection';
+import { ITarget } from './chromeConnection';
+import { IPathMapping } from '../debugAdapterInterfaces';
 
-export function targetUrlToClientPathByPathMappings(scriptUrl: string, pathMapping: any): string {
+/**
+ * Takes the path component of a target url (starting with '/') and applies pathMapping
+ */
+export function applyPathMappingsToTargetUrlPath(scriptUrlPath: string, pathMapping: IPathMapping): string {
+    if (!pathMapping) {
+        return '';
+    }
+
+    if (!scriptUrlPath || !scriptUrlPath.startsWith('/')) {
+        return '';
+    }
+
+    const mappingKeys = Object.keys(pathMapping)
+        .sort((a, b) => b.length - a.length);
+    for (let pattern of mappingKeys) {
+        // empty pattern match nothing use / to match root
+        if (!pattern) {
+            continue;
+        }
+
+        const mappingRHS = pathMapping[pattern];
+        if (pattern[0] !== '/') {
+            logger.log(`PathMapping keys should be absolute: ${pattern}`);
+            pattern = '/' + pattern;
+        }
+
+        if (pathMappingPatternMatchesPath(pattern, scriptUrlPath)) {
+            return toClientPath(pattern, mappingRHS, scriptUrlPath);
+        }
+    }
+
+    return '';
+}
+
+function pathMappingPatternMatchesPath(pattern: string, scriptPath: string): boolean {
+    if (pattern === scriptPath) {
+        return true;
+    }
+
+    if (!pattern.endsWith('/')) {
+        // Don't match /foo with /foobar/something
+        pattern += '/';
+    }
+
+    return scriptPath.startsWith(pattern);
+}
+
+export function applyPathMappingsToTargetUrl(scriptUrl: string, pathMapping: IPathMapping): string {
     const parsedUrl = url.parse(scriptUrl);
     if (!parsedUrl.protocol || parsedUrl.protocol.startsWith('file') || !parsedUrl.pathname) {
         // Skip file: URLs and paths, and invalid things
         return '';
     }
 
-    const urlWithoutQuery = parsedUrl.protocol + "//" + parsedUrl.host + parsedUrl.pathname;
-    const mappingKeys = Object.keys(pathMapping)
-        .sort((a, b) => b.length - a.length);
-    for (let pattern of mappingKeys) {
-        // empty pattern match nothing use / to match root
-        if (pattern) {
-            const localPath = pathMapping[pattern];
-            const parsedPattern = url.parse(pattern);
-
-            if (parsedPattern.protocol) {
-                // pattern is an url with protocol
-                if (urlWithoutQuery.startsWith(pattern)) {
-                    const clientPath = toClientPath(localPath, parsedUrl.pathname, pattern);
-                    if (clientPath) {
-                        return clientPath;
-                    }
-                }
-            } else if (pattern[0] === "/") {
-                // pattern is absolute
-                if (parsedUrl.pathname.startsWith(pattern)) {
-                    const clientPath = toClientPath(localPath, parsedUrl.pathname, pattern);
-                    if (clientPath) {
-                        return clientPath;
-                    }
-                }
-            } else {
-                // pattern is relative
-                // avoid matching whole segment
-                pattern = "/" + pattern;
-                const indexOf = parsedUrl.pathname.indexOf(pattern);
-                if (indexOf !== -1) {
-                    const clientPath = toClientPath(localPath, parsedUrl.pathname.substring(indexOf), pattern);
-                    if (clientPath) {
-                        return clientPath;
-                    }
-                }
-            }
-        }
-    }
-    return '';
+    return applyPathMappingsToTargetUrlPath(parsedUrl.pathname, pathMapping);
 }
 
-function toClientPath(localPath: string, source: string, pattern: string): string {
-    if (source.length === pattern.length) {
-        return localPath;
-    } else {
-        // Verify that matching whole segment of the pattern
-        if (source[pattern.length - 1] === "/"
-            || source[pattern.length] === "/") {
-            const r = decodeURIComponent(source.substring(pattern.length));
-            return path.join(localPath, r);
-        }
-    }
-    return '';
+function toClientPath(pattern: string, mappingRHS: string, scriptPath: string): string {
+    const rest = decodeURIComponent(scriptPath.substring(pattern.length));
+    const mappedResult = rest ?
+        path.join(mappingRHS, rest) :
+        mappingRHS;
+
+    return mappedResult;
 }
 
 /**
- * Maps a url from target to an absolute local path.
+ * Maps a url from target to an absolute local path, if it exists.
  * If not given an absolute path (with file: prefix), searches the current working directory for a matching file.
  * http://localhost/scripts/code.js => d:/app/scripts/code.js
  * file:///d:/scripts/code.js => d:/scripts/code.js
  */
-export function targetUrlToClientPath(webRoot: string, aUrl: string): string {
+export function targetUrlToClientPath(aUrl: string, pathMapping: IPathMapping): string {
     if (!aUrl) {
         return '';
     }
@@ -90,23 +95,19 @@ export function targetUrlToClientPath(webRoot: string, aUrl: string): string {
         return canonicalUrl;
     }
 
-    // If we don't have the client workingDirectory for some reason, don't try to map the url to a client path
-    if (!webRoot) {
-        return '';
-    }
-
     // Search the filesystem under the webRoot for the file that best matches the given url
-    let pathName = decodeURIComponent(url.parse(canonicalUrl).pathname);
+    let pathName = url.parse(canonicalUrl).pathname;
     if (!pathName || pathName === '/') {
         return '';
     }
 
     // Dealing with the path portion of either a url or an absolute path to remote file.
-    // Need to force path.sep separator
-    pathName = pathName.replace(/\//g, path.sep);
-    const pathParts = pathName.split(path.sep);
+    const pathParts = pathName
+        .replace(/^\//, '') // Strip leading /
+        .split(/[\/\\]/);
     while (pathParts.length > 0) {
-        const clientPath = path.join(webRoot, pathParts.join(path.sep));
+        const joinedPath = '/' + pathParts.join('/');
+        const clientPath = applyPathMappingsToTargetUrlPath(joinedPath, pathMapping);
         if (utils.existsSync(clientPath)) {
             return utils.canonicalizeUrl(clientPath);
         }
@@ -169,11 +170,14 @@ export function remoteObjectToValue(object: Crdp.Runtime.RemoteObject, stringify
  */
 export function getMatchingTargets(targets: ITarget[], targetUrlPattern: string): ITarget[] {
     const standardizeMatch = (aUrl: string) => {
-        // Strip file:///, if present
-        aUrl = utils.fileUrlToPath(aUrl).toLowerCase();
-
-        // Strip the protocol, if present
-        if (aUrl.indexOf('://') >= 0) aUrl = aUrl.split('://')[1];
+        aUrl = aUrl.toLowerCase();
+        if (utils.isFileUrl(aUrl)) {
+            // Strip file:///, if present
+            aUrl = utils.fileUrlToPath(aUrl);
+        } else if (utils.isURL(aUrl) && aUrl.indexOf('://') >= 0) {
+            // Strip the protocol, if present
+            aUrl = aUrl.substr(aUrl.indexOf('://') + 3);
+        }
 
         // Remove optional trailing /
         if (aUrl.endsWith('/')) aUrl = aUrl.substr(0, aUrl.length - 1);
@@ -182,7 +186,7 @@ export function getMatchingTargets(targets: ITarget[], targetUrlPattern: string)
     };
 
     targetUrlPattern = standardizeMatch(targetUrlPattern);
-    targetUrlPattern = utils.escapeRegExpCharacters(targetUrlPattern).replace(/\\\*/g, '.*');
+    targetUrlPattern = utils.escapeRegexSpecialChars(targetUrlPattern, '/*').replace(/\*/g, '.*');
 
     const targetUrlRegex = new RegExp('^' + targetUrlPattern + '$', 'g');
     return targets.filter(target => !!standardizeMatch(target.url).match(targetUrlRegex));
@@ -280,4 +284,21 @@ export function selectBreakpointLocation(lineNumber: number, columnNumber: numbe
     }
 
     return locations[0];
+}
+
+export const EVAL_NAME_PREFIX = 'VM';
+
+export function isEvalScript(scriptPath: string): boolean {
+    return scriptPath.startsWith(EVAL_NAME_PREFIX);
+}
+
+/* Constructs the regex for files to enable break on load
+For example, for a file index.js the regex will match urls containing index.js, index.ts, abc/index.ts, index.bin.js etc
+It won't match index100.js, indexabc.ts etc */
+export function getUrlRegexForBreakOnLoad(url: string): string {
+    const fileNameWithoutFullPath = path.parse(url).base;
+    const fileNameWithoutExtension = path.parse(fileNameWithoutFullPath).name;
+    const escapedFileName = fileNameWithoutExtension.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+    return '.*[\\\\\\/]' + escapedFileName + '([^A-z^0-9].*)?$';
 }

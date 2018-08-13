@@ -4,14 +4,11 @@
 
 import * as mockery from 'mockery';
 import * as assert from 'assert';
-import * as _path from 'path';
 
 import * as testUtils from './testUtils';
 
 /** Utils without mocks - use for type only */
 import * as _Utils from '../src/utils';
-
-let path: typeof _path;
 
 const MODULE_UNDER_TEST = '../src/utils';
 suite('Utils', () => {
@@ -24,9 +21,9 @@ suite('Utils', () => {
 
         mockery.enable({ useCleanCache: true, warnOnReplace: false, warnOnUnregistered: false });
         testUtils.registerWin32Mocks();
+        testUtils.registerLocMocks();
         mockery.registerMock('fs', { statSync: () => { } });
         mockery.registerMock('http', {});
-        path = require('path');
     });
 
     teardown(() => {
@@ -157,6 +154,17 @@ suite('Utils', () => {
         test('strips trailing slash', () => {
             testCanUrl('http://site.com/', 'http://site.com');
         });
+
+        test('paths with different cases get canonicalized to the same string when case insensitive', () => {
+            const Utils = getUtils();
+            try {
+                Utils.setCaseSensitivePaths(false);
+                assert.equal(Utils.canonicalizeUrl('c:\\Users\\username\\source\\repos\\WebApplication77\\WebApplication77\\Scripts\\bootstrap.js'),
+                    Utils.canonicalizeUrl('c:\\users\\username\\source\\repos\\WebApplication77\\WebApplication77\\Scripts\\bootstrap.js'));
+            } finally {
+                Utils.setCaseSensitivePaths(true);
+            }
+        });
     });
 
     suite('fileUrlToPath()', () => {
@@ -191,6 +199,23 @@ suite('Utils', () => {
             // Should remove query args?
             const expectedPath = '/Users/me/file?config={"a":"b"}';
             testFileUrlToPath('file://' + expectedPath, expectedPath);
+        });
+    });
+
+    suite('forceForwardSlashes', () => {
+        test('works for c:/... cases', () => {
+            assert.equal(getUtils().forceForwardSlashes('C:\\foo\\bar'), 'C:/foo/bar');
+            assert.equal(getUtils().forceForwardSlashes('C:\\'), 'C:/');
+            assert.equal(getUtils().forceForwardSlashes('C:/foo\\bar'), 'C:/foo/bar');
+        });
+
+        test('works for relative paths', () => {
+            assert.equal(getUtils().forceForwardSlashes('foo\\bar'), 'foo/bar');
+            assert.equal(getUtils().forceForwardSlashes('foo\\bar/baz'), 'foo/bar/baz');
+        });
+
+        test('fixes escaped forward slashes', () => {
+            assert.equal(getUtils().forceForwardSlashes('foo\\/bar'), 'foo/bar');
         });
     });
 
@@ -265,11 +290,15 @@ suite('Utils', () => {
         test('encodes as URI and forces forwards slash', () => {
             assert.equal(getUtils().pathToFileURL('c:\\path with spaces\\blah.js'), 'file:///c:/path%20with%20spaces/blah.js');
         });
+
+        test('normalizes', () => {
+            assert.equal(getUtils().pathToFileURL('c:\\path with spaces\\.\\foo\\..\\blah.js', true), 'file:///c:/path%20with%20spaces/blah.js');
+        });
     });
 
     suite('pathToRegex - case sensitive', () => {
         function testPathToRegex(aPath: string, expectedRegex: string): void {
-            assert.equal(getUtils().pathToRegex(aPath, true), expectedRegex);
+            assert.equal(getUtils().pathToRegex(aPath), expectedRegex);
         }
 
         test('works for a simple posix path', () => {
@@ -295,7 +324,13 @@ suite('Utils', () => {
 
     suite('pathToRegex - case insensitive', () => {
         function testPathToRegex(aPath: string, expectedRegex: string): void {
-            assert.equal(getUtils().pathToRegex(aPath, false), expectedRegex);
+            const utils = getUtils();
+            try {
+                utils.setCaseSensitivePaths(false);
+                assert.equal(utils.pathToRegex(aPath), expectedRegex);
+            } finally {
+                utils.setCaseSensitivePaths(true);
+            }
         }
 
         test('works for a simple posix path', () => {
@@ -356,6 +391,10 @@ suite('Utils', () => {
             // but not something that ends in foo.js
             assert(!r.test('barfoo.js'));
         });
+
+        test('.* in glob', () => {
+            testPathGlobToBlackboxedRegex('foo.*.bar', 'foo\\..*\\.bar');
+        });
     });
 
     suite('makeRegexNotMatchPath/makeRegexMatchPath', () => {
@@ -392,6 +431,44 @@ suite('Utils', () => {
 
         test('path segment', () => {
             testMakeRegexNotMatchPath(/bar\d/, '/foo/bar1', '/foo/bar2');
+        });
+    });
+
+    suite('firstLine', () => {
+        test('gets first line', () => {
+            [
+                ['foo\nbar', 'foo'],
+                ['\nbar', ''],
+                ['foo', 'foo'],
+                ['', ''],
+                [undefined, '']
+            ].forEach(([text, firstLine]) => {
+                assert.equal(getUtils().firstLine(text), firstLine);
+            });
+        });
+    });
+
+    suite('isAbsolute_win', () => {
+        test('true for windows-style absolute paths', () => {
+            [
+                'c:/foo/bar/blah.js',
+                'c:/',
+                'z:/foo',
+                'z:\\',
+                'z:\\foo',
+            ].forEach(testPath => assert(getUtils().isAbsolute_win(testPath)));
+        });
+
+        test('false for everything else', () => {
+            [
+                'c :/foo/bar/blah.js',
+                'c:',
+                'ö:/foo',
+                '/foo/bar',
+                'foo/bar',
+                '',
+                'file:///foo/bar/blah.js',
+            ].forEach(testPath => assert.equal(getUtils().isAbsolute_win(testPath), false));
         });
     });
 });

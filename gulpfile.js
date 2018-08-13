@@ -14,7 +14,6 @@ const merge = require('merge2');
 const debug = require('gulp-debug');
 const del = require('del');
 const plumber = require('gulp-plumber');
-const crdp = require('chrome-remote-debug-protocol');
 const nls = require('vscode-nls-dev');
 const es = require('event-stream');
 const runSequence = require('run-sequence');
@@ -24,19 +23,21 @@ const transifexApiName = 'api';
 const transifexApiToken = process.env.TRANSIFEX_API_TOKEN;
 const transifexProjectName = 'vscode-extensions';
 const transifexExtensionName = 'vscode-chrome-debug-core';
-const vscodeLanguages = [
-    'zh-hans',
-    'zh-hant',
-    'ja',
-    'ko',
-    'de',
-    'fr',
-    'es',
-    'ru',
-    'it',
-    'pt-br',
-    'hu',
-    'tr'
+
+const defaultLanguages = [
+    { id: 'zh-tw', folderName: 'cht', transifexId: 'zh-hant' },
+    { id: 'zh-cn', folderName: 'chs', transifexId: 'zh-hans' },
+    { id: 'ja', folderName: 'jpn' },
+    { id: 'ko', folderName: 'kor' },
+    { id: 'de', folderName: 'deu' },
+    { id: 'fr', folderName: 'fra' },
+    { id: 'es', folderName: 'esn' },
+    { id: 'ru', folderName: 'rus' },
+    { id: 'it', folderName: 'ita' },
+    { id: 'cs', folderName: 'csy' },
+    { id: 'tr', folderName: 'trk' },
+    { id: 'pt-br', folderName: 'ptb', transifexId: 'pt_BR' },
+    { id: 'pl', folderName: 'plk' }
 ];
 
 const tsconfig = require('./tsconfig.json');
@@ -44,7 +45,6 @@ const sources = tsconfig.include;
 
 const libs = [
     'src',
-    'crdp'
 ].map(libFolder => libFolder + '/**/*.d.ts');
 
 const lintSources = [
@@ -59,45 +59,58 @@ const exclusion = '!' + testDataDir + '**';
 tsBuildSources.push(exclusion);
 lintSources.push(exclusion);
 
-function doBuild(buildNls) {
+function doBuild(buildNls, failOnError) {
+    let gotError = false;
     const tsProject = ts.createProject('tsconfig.json', { typescript });
     const tsResult = gulp.src(tsBuildSources, { base: '.' })
         .pipe(plumber())
         .pipe(sourcemaps.init())
-        .pipe(ts(tsProject));
+        .pipe(tsProject())
+        .once('error', () => {
+            gotError = true;
+        });
 
     return merge([
         tsResult.dts
             .pipe(gulp.dest('lib')),
         tsResult.js
             .pipe(buildNls ? nls.rewriteLocalizeCalls() : es.through())
-            .pipe(buildNls ? nls.createAdditionalLanguageFiles(nls.coreLanguages, 'i18n', 'out') : es.through())
+            .pipe(buildNls ? nls.createAdditionalLanguageFiles(defaultLanguages, 'i18n', 'out') : es.through())
+            .pipe(buildNls ? nls.bundleMetaDataFiles('vscode-chrome-debug-core', 'out') : es.through())
+            .pipe(buildNls ? nls.bundleLanguageFiles() : es.through())
 
-            // .. to compensate for TS returning paths from 'out'
-            .pipe(sourcemaps.write('.', { includeContent: true, sourceRoot: '..' }))
+            .pipe(sourcemaps.write('.', { includeContent: true, sourceRoot: '.' }))
             .pipe(gulp.dest('out')),
         gulp.src(libs, { base: '.' })
             .pipe(gulp.dest('lib')),
         gulp.src(testDataDir + 'app*', { base: '.' })
             .pipe(gulp.dest('out'))
-    ]);
+    ])
+        .once('error', () => {
+            gotError = true;
+        })
+        .once('finish', () => {
+            if (failOnError && gotError) {
+                process.exit(1);
+            }
+        });
 }
 
-gulp.task('build', () => {
-    return doBuild(true);
+gulp.task('build', ['clean'], () => {
+    return doBuild(true, true);
 });
 
-gulp.task('dev-build', () => {
-    return doBuild(false);
+gulp.task('_dev-build', () => {
+    return doBuild(false, false);
 });
 
 gulp.task('clean', () => {
     return del(['out', 'lib']);
 });
 
-gulp.task('watch', ['dev-build'], () => {
+gulp.task('watch', ['clean'], () => {
     log('Watching build sources...');
-    return gulp.watch(sources, ['dev-build']);
+    return runSequence('_dev-build', () => gulp.watch(sources, ['_dev-build']));
 });
 
 gulp.task('default', ['build']);
@@ -108,21 +121,31 @@ gulp.task('tslint', () => {
         .pipe(tslint.report());
 });
 
-gulp.task('transifex-push', function () {
-    return gulp.src('**/*.nls.json')
-        .pipe(nls.prepareXlfFiles(transifexProjectName, transifexExtensionName))
+gulp.task('transifex-push', ['build'], function () {
+    return gulp.src(['out/nls.metadata.header.json', 'out/nls.metadata.json'])
+        .pipe(nls.createXlfFiles(transifexProjectName, transifexExtensionName))
         .pipe(nls.pushXlfFiles(transifexApiHostname, transifexApiName, transifexApiToken));
 });
 
+gulp.task('transifex-push-test', ['build'], function () {
+    return gulp.src(['out/nls.metadata.header.json', 'out/nls.metadata.json'])
+        .pipe(nls.createXlfFiles(transifexProjectName, transifexExtensionName))
+        .pipe(gulp.dest(path.join('..', `${transifexExtensionName}-push-test`)));
+});
+
 gulp.task('transifex-pull', function () {
-    return nls.pullXlfFiles(transifexApiHostname, transifexApiName, transifexApiToken, vscodeLanguages, [{ name: transifexExtensionName, project: transifexProjectName }])
-        .pipe(gulp.dest(`../${transifexExtensionName}-localization`));
+    return es.merge(defaultLanguages.map(function (language) {
+        return nls.pullXlfFiles(transifexApiHostname, transifexApiName, transifexApiToken, language, [{ name: transifexExtensionName, project: transifexProjectName }]).
+            pipe(gulp.dest(`../${transifexExtensionName}-localization/${language.folderName}`));
+    }));
 });
 
 gulp.task('i18n-import', function () {
-    return gulp.src(`../${transifexExtensionName}-localization/**/*.xlf`)
-        .pipe(nls.prepareJsonFiles())
-        .pipe(gulp.dest('./i18n'));
+    return es.merge(defaultLanguages.map(function (language) {
+        return gulp.src(`../${transifexExtensionName}-localization/${language.folderName}/**/*.xlf`)
+            .pipe(nls.prepareJsonFiles())
+            .pipe(gulp.dest(path.join('./i18n', language.folderName)));
+    }));
 });
 
 function test() {
@@ -139,9 +162,4 @@ gulp.task('test', test);
 
 gulp.task('watch-build-test', ['dev-build', 'dev-build-test'], () => {
     return gulp.watch(sources, ['dev-build', 'dev-build-test']);
-});
-
-gulp.task('regenerate-crdp', cb => {
-    crdp.downloadAndGenerate(path.join(__dirname, 'crdp/crdp.d.ts'))
-        .then(cb);
 });

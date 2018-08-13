@@ -2,27 +2,29 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {Logger} from 'vscode-debugadapter';
+import { Logger } from 'vscode-debugadapter';
 import * as utils from '../utils';
 import * as telemetry from '../telemetry';
+import { IStepStartedEventsEmitter, StepProgressEventsEmitter, IObservableEvents } from '../executionTimingsReporter';
 
 import * as chromeUtils from './chromeUtils';
 
-import {ITargetDiscoveryStrategy, ITargetFilter, ITarget} from './chromeConnection';
+import { ITargetDiscoveryStrategy, ITargetFilter, ITarget } from './chromeConnection';
 
 import * as nls from 'vscode-nls';
-const localize = nls.config(process.env.VSCODE_NLS_CONFIG)();
+const localize = nls.loadMessageBundle();
 
-export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy {
+export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObservableEvents<IStepStartedEventsEmitter> {
     private logger: Logger.ILogger;
     private telemetry: telemetry.ITelemetryReporter;
+    public readonly events = new StepProgressEventsEmitter();
 
     constructor(_logger: Logger.ILogger, _telemetry: telemetry.ITelemetryReporter) {
         this.logger = _logger;
         this.telemetry = _telemetry;
     }
 
-    async getTarget(address: string, port: number, targetFilter?: ITargetFilter, targetUrl?: string): Promise<string> {
+    async getTarget(address: string, port: number, targetFilter?: ITargetFilter, targetUrl?: string): Promise<ITarget> {
         const targets = await this.getAllTargets(address, port, targetFilter, targetUrl);
         if (targets.length > 1) {
             this.logger.log('Warning: Found more than one valid target page. Attaching to the first one. Available pages: ' + JSON.stringify(targets.map(target => target.url)));
@@ -33,54 +35,105 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy {
         this.logger.verbose(`Attaching to target: ${JSON.stringify(selectedTarget)}`);
         this.logger.verbose(`WebSocket Url: ${selectedTarget.webSocketDebuggerUrl}`);
 
-        return selectedTarget.webSocketDebuggerUrl;
+        return selectedTarget;
     }
 
     async getAllTargets(address: string, port: number, targetFilter?: ITargetFilter, targetUrl?: string): Promise<ITarget[]> {
         const targets = await this._getTargets(address, port);
+        /* __GDPR__
+           "targetCount" : {
+              "numTargets" : { "classification": "SystemMetaData", "purpose": "FeatureInsight", "isMeasurement": true },
+              "${include}": [ "${DebugCommonProperties}" ]
+           }
+         */
         this.telemetry.reportEvent('targetCount', { numTargets: targets.length });
 
         if (!targets.length) {
-            return utils.errP(localize('attach.responseButNoTargets', "Got a response from the target app, but no target pages found"));
+            return utils.errP(localize('attach.responseButNoTargets', 'Got a response from the target app, but no target pages found'));
         }
 
         return this._getMatchingTargets(targets, targetFilter, targetUrl);
-    };
+    }
 
-    private _getTargets(address: string, port: number): Promise<ITarget[]> {
-        const url = `http://${address}:${port}/json`;
-        this.logger.log(`Discovering targets via ${url}`);
-        return utils.getURL(url).then<ITarget[]>(jsonResponse => {
-            try {
-                const responseArray = JSON.parse(jsonResponse);
-                if (Array.isArray(responseArray)) {
-                    return (responseArray as ITarget[])
-                        .map(target => this._fixRemoteUrl(address, port, target));
-                }
-            } catch (e) {
-                // JSON.parse can throw
+    private async _getVersionData(address: string, port: number): Promise<void> {
+
+        const url = `http://${address}:${port}/json/version`;
+        this.logger.log(`Getting browser and debug protocol version via ${url}`);
+
+        const jsonResponse = await utils.getURL(url, { headers: { Host: 'localhost' } })
+            .catch(e => this.logger.log(`There was an error connecting to ${url} : ${e.message}`));
+
+        try {
+            if (jsonResponse) {
+                const response = JSON.parse(jsonResponse);
+                this.logger.log(`Got browser version: ${response.Browser}`);
+                this.logger.log(`Got debug protocol version: ${response['Protocol-Version']}`);
+
+                /* __GDPR__
+                   "targetDebugProtocolVersion" : {
+                       "debugProtocolVersion" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+                       "${include}": [ "${DebugCommonProperties}" ]
+                   }
+                 */
+                this.telemetry.reportEvent('targetDebugProtocolVersion', { debugProtocolVersion: response['Protcol-Version'] });
             }
+        } catch (e) {
+            this.logger.log(`Didn't get a valid response for /json/version call. Error: ${e.message}. Response: ${jsonResponse}`);
+        }
+    }
 
-            return utils.errP(localize('attach.invalidResponse', "Response from the target seems invalid: {0}", jsonResponse));
-        },
-        e => {
-            return utils.errP(localize('attach.cannotConnect', "Cannot connect to the target: {0}", e.message));
-        });
+    private async _getTargets(address: string, port: number): Promise<ITarget[]> {
+
+        // Get the browser and the protocol version
+        this._getVersionData(address, port);
+
+        /* __GDPR__FRAGMENT__
+           "StepNames" : {
+              "Attach.RequestDebuggerTargetsInformation" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+           }
+         */
+        this.events.emitStepStarted('Attach.RequestDebuggerTargetsInformation');
+
+        const checkDiscoveryEndpoint = (url: string) => {
+            this.logger.log(`Discovering targets via ${url}`);
+            return utils.getURL(url, { headers: { Host: 'localhost' } });
+        };
+
+        const jsonResponse = await checkDiscoveryEndpoint(`http://${address}:${port}/json/list`)
+            .catch(() => checkDiscoveryEndpoint(`http://${address}:${port}/json`))
+            .catch(e => utils.errP(localize('attach.cannotConnect', 'Cannot connect to the target: {0}', e.message)));
+
+        /* __GDPR__FRAGMENT__
+           "StepNames" : {
+              "Attach.ProcessDebuggerTargetsInformation" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+           }
+         */
+        this.events.emitStepStarted('Attach.ProcessDebuggerTargetsInformation');
+        try {
+            const responseArray = JSON.parse(jsonResponse);
+            if (Array.isArray(responseArray)) {
+                return (responseArray as ITarget[])
+                    .map(target => this._fixRemoteUrl(address, port, target));
+            } else {
+                return utils.errP(localize('attach.invalidResponseArray', 'Response from the target seems invalid: {0}', jsonResponse));
+            }
+        } catch (e) {
+            return utils.errP(localize('attach.invalidResponse', 'Response from the target seems invalid. Error: {0}. Response: {1}', e.message, jsonResponse));
+        }
     }
 
     private _getMatchingTargets(targets: ITarget[], targetFilter?: ITargetFilter, targetUrl?: string): ITarget[] {
-        if (targetFilter) {
-            // Apply the consumer-specific target filter
-            targets = targets.filter(targetFilter);
-        }
-
-        // If a url was specified, try to filter to that url
-        let filteredTargets = targetUrl ?
-            chromeUtils.getMatchingTargets(targets, targetUrl) :
+        let filteredTargets = targetFilter ?
+            targets.filter(targetFilter) : // Apply the consumer-specific target filter
             targets;
 
+        // If a url was specified, try to filter to that url
+        filteredTargets = targetUrl ?
+            chromeUtils.getMatchingTargets(filteredTargets, targetUrl) :
+            filteredTargets;
+
         if (!filteredTargets.length) {
-            throw new Error(localize('attach.noMatchingTarget', "Can't find a target that matches: {0}. Available pages: {1}", targetUrl, JSON.stringify(targets.map(target => target.url))));
+            throw new Error(localize('attach.noMatchingTarget', "Can't find a valid target that matches: {0}. Available pages: {1}", targetUrl, JSON.stringify(targets.map(target => target.url))));
         }
 
         // If all possible targets appear to be attached to have some other devtool attached, then fail
@@ -94,7 +147,7 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy {
 
     private _fixRemoteUrl(remoteAddress: string, remotePort: number, target: ITarget): ITarget {
         if (target.webSocketDebuggerUrl) {
-            const addressMatch = target.webSocketDebuggerUrl.match(/ws:\/\/(.*:\d+)\/?/);
+            const addressMatch = target.webSocketDebuggerUrl.match(/ws:\/\/([^/]+)\/?/);
             if (addressMatch) {
                 const replaceAddress = `${remoteAddress}:${remotePort}`;
                 target.webSocketDebuggerUrl = target.webSocketDebuggerUrl.replace(addressMatch[1], replaceAddress);

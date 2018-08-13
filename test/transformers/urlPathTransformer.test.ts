@@ -6,14 +6,10 @@ import * as assert from 'assert';
 import * as mockery from 'mockery';
 
 import * as testUtils from '../testUtils';
-import {UrlPathTransformer as _UrlPathTransformer} from '../../src/transformers/urlPathTransformer';
+import {UrlPathTransformer as _UrlPathTransformer } from '../../src/transformers/urlPathTransformer';
 import * as chromeUtils from '../../src/chrome/chromeUtils';
 
-// As of 0.1.0, the included .d.ts is not in the right format to use the import syntax here
-// https://github.com/florinn/typemoq/issues/4
-// const typemoq: ITypeMoqStatic = require('typemoq');
-
-import {Mock, MockBehavior, It} from 'typemoq';
+import { Mock, MockBehavior, It, IMock, Times } from 'typemoq';
 
 const MODULE_UNDER_TEST = '../../src/transformers/urlPathTransformer';
 function createTransformer(): _UrlPathTransformer {
@@ -24,7 +20,7 @@ suite('UrlPathTransformer', () => {
     const TARGET_URL = 'http://mysite.com/scripts/script1.js';
     const CLIENT_PATH = testUtils.pathResolve('/projects/mysite/scripts/script1.js');
 
-    let chromeUtilsMock: Mock<typeof chromeUtils>;
+    let chromeUtilsMock: IMock<typeof chromeUtils>;
     let transformer: _UrlPathTransformer;
 
     setup(() => {
@@ -54,16 +50,12 @@ suite('UrlPathTransformer', () => {
             SET_BP_ARGS = { source: { path: CLIENT_PATH } };
         });
 
-        test('resolves correctly when it can map the client script to the target script', () => {
+        test('resolves correctly when it can map the client script to the target script', async () => {
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPathByPathMappings(It.isValue(TARGET_URL), It.isAny()))
-                .returns(() => '').verifiable();
-
-            chromeUtilsMock
-                .setup(x => x.targetUrlToClientPath(It.isValue(undefined), It.isValue(TARGET_URL)))
+                .setup(x => x.targetUrlToClientPath(It.isValue(TARGET_URL), It.isValue(undefined)))
                 .returns(() => CLIENT_PATH).verifiable();
 
-            transformer.scriptParsed(TARGET_URL);
+            await transformer.scriptParsed(TARGET_URL);
             transformer.setBreakpoints(<any>SET_BP_ARGS);
             assert.deepEqual(SET_BP_ARGS, EXPECTED_SET_BP_ARGS);
         });
@@ -82,36 +74,32 @@ suite('UrlPathTransformer', () => {
     });
 
     suite('scriptParsed', () => {
-        test('returns the client path when the file can be mapped', () => {
+        test('returns the client path when the file can be mapped', async () => {
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPathByPathMappings(It.isValue(TARGET_URL), It.isAny()))
-                .returns(() => '').verifiable();
-
-            chromeUtilsMock
-                .setup(x => x.targetUrlToClientPath(It.isValue(undefined), It.isValue(TARGET_URL)))
+                .setup(x => x.targetUrlToClientPath(It.isValue(TARGET_URL), It.isValue(undefined)))
                 .returns(() => CLIENT_PATH).verifiable();
 
-            assert.equal(transformer.scriptParsed(TARGET_URL), CLIENT_PATH);
+            assert.equal(await transformer.scriptParsed(TARGET_URL), CLIENT_PATH);
         });
 
-        test(`returns the given path when the file can't be mapped`, () => {
+        test(`returns the given path when the file can't be mapped`, async () => {
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPathByPathMappings(It.isValue(TARGET_URL), It.isAny()))
+                .setup(x => x.targetUrlToClientPath(It.isValue(TARGET_URL), It.isValue(undefined)))
                 .returns(() => '').verifiable();
 
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPath(It.isValue(undefined), It.isValue(TARGET_URL)))
-                .returns(() => '').verifiable();
+                .setup(x => x.EVAL_NAME_PREFIX)
+                .returns(() => 'VM').verifiable();
 
-            assert.equal(transformer.scriptParsed(TARGET_URL), TARGET_URL);
+            assert.equal(await transformer.scriptParsed(TARGET_URL), TARGET_URL);
         });
 
-        test('ok with uncanonicalized paths', () => {
+        test('ok with uncanonicalized paths', async () => {
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPathByPathMappings(It.isValue(TARGET_URL + '?queryparam'), It.isAny()))
+                .setup(x => x.targetUrlToClientPath(It.isValue(TARGET_URL + '?queryparam'), It.isValue(undefined)))
                 .returns(() => CLIENT_PATH).verifiable();
 
-            assert.equal(transformer.scriptParsed(TARGET_URL + '?queryparam'), CLIENT_PATH);
+            assert.equal(await transformer.scriptParsed(TARGET_URL + '?queryparam'), CLIENT_PATH);
             assert.equal(transformer.getClientPathFromTargetPath(TARGET_URL + '?queryparam'), CLIENT_PATH);
             assert.equal(transformer.getTargetPathFromClientPath(CLIENT_PATH), TARGET_URL + '?queryparam');
         });
@@ -124,22 +112,22 @@ suite('UrlPathTransformer', () => {
             { line: 8, column: 9 }
         ];
 
-        test('modifies the source path and clears sourceReference when the file can be mapped', () => {
+        test('modifies the source path and clears sourceReference when the file can be mapped', async () => {
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPath(It.isValue(undefined), It.isValue(TARGET_URL)))
-                .returns(() => CLIENT_PATH).verifiable();
+                .setup(x => x.targetUrlToClientPath(It.isValue(TARGET_URL), It.isValue(undefined)))
+                .returns(() => CLIENT_PATH).verifiable(Times.atLeastOnce());
 
             const response = testUtils.getStackTraceResponseBody(TARGET_URL, RUNTIME_LOCATIONS, [1, 2, 3]);
             const expectedResponse = testUtils.getStackTraceResponseBody(CLIENT_PATH, RUNTIME_LOCATIONS);
 
-            transformer.stackTraceResponse(response);
+            await transformer.stackTraceResponse(response);
             assert.deepEqual(response, expectedResponse);
         });
 
         test(`doesn't modify the source path or clear the sourceReference when the file can't be mapped`, () => {
             chromeUtilsMock
-                .setup(x => x.targetUrlToClientPath(It.isValue(undefined), It.isValue(TARGET_URL)))
-                .returns(() => '').verifiable();
+                .setup(x => x.targetUrlToClientPath(It.isValue(TARGET_URL), It.isValue(undefined)))
+                .returns(() => '').verifiable(Times.atLeastOnce());
 
             const response = testUtils.getStackTraceResponseBody(TARGET_URL, RUNTIME_LOCATIONS, [1, 2, 3]);
             const expectedResponse = testUtils.getStackTraceResponseBody(TARGET_URL, RUNTIME_LOCATIONS, [1, 2, 3]);

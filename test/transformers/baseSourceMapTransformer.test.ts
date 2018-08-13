@@ -3,17 +3,17 @@
  *--------------------------------------------------------*/
 /* tslint:disable:typedef */
 
-import {DebugProtocol} from 'vscode-debugprotocol';
+import { DebugProtocol } from 'vscode-debugprotocol';
 
 import * as assert from 'assert';
 import * as mockery from 'mockery';
-import {Mock, MockBehavior, It} from 'typemoq';
+import { Mock, MockBehavior, It, IMock, Times } from 'typemoq';
 
-import {ISetBreakpointsResponseBody,
-    ILaunchRequestArgs, ISetBreakpointsArgs} from '../../src/debugAdapterInterfaces';
+import { ISetBreakpointsResponseBody,
+    ILaunchRequestArgs, ISetBreakpointsArgs } from '../../src/debugAdapterInterfaces';
 import * as testUtils from '../testUtils';
-import {SourceMaps} from '../../src/sourceMaps/sourceMaps';
-import {MappedPosition} from '../../src/sourceMaps/sourceMap';
+import { SourceMaps } from '../../src/sourceMaps/sourceMaps';
+import { MappedPosition } from '../../src/sourceMaps/sourceMap';
 import * as utils from '../../src/utils';
 
 /* tslint:disable:no-function-expression */
@@ -47,10 +47,10 @@ const RUNTIME_BPS2 = () => <DebugProtocol.SourceBreakpoint[]>[
     ];
 
 // Not mocked, use for type only
-import {BaseSourceMapTransformer as _BaseSourceMapTransformer} from '../../src/transformers/baseSourceMapTransformer';
+import {BaseSourceMapTransformer as _BaseSourceMapTransformer } from '../../src/transformers/baseSourceMapTransformer';
 
 suite('BaseSourceMapTransformer', () => {
-    let utilsMock: Mock<typeof utils>;
+    let utilsMock: IMock<typeof utils>;
 
     setup(() => {
         testUtils.setupUnhandledRejectionListener();
@@ -99,18 +99,21 @@ suite('BaseSourceMapTransformer', () => {
             return args;
         }
 
-        function createMergedSourcesMock(args: ISetBreakpointsArgs, args2: ISetBreakpointsArgs): Mock<SourceMaps> {
+        function createMergedSourcesMock(args: ISetBreakpointsArgs, args2: ISetBreakpointsArgs): IMock<SourceMaps> {
             const mock = Mock.ofType(SourceMaps, MockBehavior.Strict);
             mockery.registerMock('../sourceMaps/sourceMaps', { SourceMaps: function(): any { return mock.object; } });
             mock
                 .setup(x => x.getGeneratedPathFromAuthoredPath(It.isValue(AUTHORED_PATH)))
-                .returns(() => RUNTIME_PATH).verifiable();
+                .returns(() => RUNTIME_PATH)
+                .verifiable(Times.atLeastOnce());
             mock
                 .setup(x => x.getGeneratedPathFromAuthoredPath(It.isValue(AUTHORED_PATH2)))
-                .returns(() => RUNTIME_PATH).verifiable();
+                .returns(() => RUNTIME_PATH)
+                .verifiable(Times.atLeastOnce());
             mock
                 .setup(x => x.allMappedSources(It.isValue(RUNTIME_PATH)))
-                .returns(() => [AUTHORED_PATH, AUTHORED_PATH2]).verifiable();
+                .returns(() => [AUTHORED_PATH, AUTHORED_PATH2])
+                .verifiable(Times.atLeastOnce());
             args.breakpoints.forEach((bp, i) => {
                 mock
                     .setup(x => x.mapToGenerated(It.isValue(AUTHORED_PATH), It.isValue(bp.line), It.isValue(bp.column || 0)))
@@ -142,7 +145,7 @@ suite('BaseSourceMapTransformer', () => {
         });
 
         // #106
-        test.skip(`if the source can't be mapped, waits until the runtime script is loaded`, () => {
+        test.skip(`if the source can't be mapped, waits until the runtime script is loaded`, async () => {
             const args = createArgs(AUTHORED_PATH, AUTHORED_BPS());
             const expected = createExpectedArgs(AUTHORED_PATH, RUNTIME_PATH, RUNTIME_BPS());
             const sourceMapURL = 'script.js.map';
@@ -172,7 +175,7 @@ suite('BaseSourceMapTransformer', () => {
             assert.deepEqual(args, expected);
             mock.verifyAll();
 
-            transformer.scriptParsed(RUNTIME_PATH, sourceMapURL);
+            await transformer.scriptParsed(RUNTIME_PATH, sourceMapURL);
             // return setBreakpointsP;
         });
 
@@ -254,7 +257,7 @@ suite('BaseSourceMapTransformer', () => {
     });
 
     suite('stackTraceResponse()', () => {
-        test('modifies the response stackFrames', () => {
+        test('modifies the response stackFrames', async () => {
             utilsMock
                 .setup(x => x.existsSync(It.isValue(AUTHORED_PATH)))
                 .returns(() => true);
@@ -262,18 +265,18 @@ suite('BaseSourceMapTransformer', () => {
             const response = testUtils.getStackTraceResponseBody(RUNTIME_PATH, RUNTIME_BPS(), [1, 2, 3]);
             const expected = testUtils.getStackTraceResponseBody(AUTHORED_PATH, AUTHORED_BPS(), undefined, /*isSourceMapped=*/true);
 
-            getTransformer().stackTraceResponse(response);
+            await getTransformer().stackTraceResponse(response);
             assert.deepEqual(response, expected);
         });
 
-        test('doesn\'t clear the path when there are no sourcemaps', () => {
+        test('doesn\'t clear the path when there are no sourcemaps', async () => {
             const response = testUtils.getStackTraceResponseBody(RUNTIME_PATH, RUNTIME_BPS(), [1, 2, 3]);
 
-            getTransformer(/*sourceMaps=*/false).stackTraceResponse(response);
+            await getTransformer(/*sourceMaps=*/false).stackTraceResponse(response);
             response.stackFrames.forEach(frame => assert(!!frame.source));
         });
 
-        test(`keeps the path when the file can't be sourcemapped if it's on disk`, () => {
+        test(`keeps the path when the file can't be sourcemapped if it's on disk`, async () => {
             const mock = Mock.ofType(SourceMaps, MockBehavior.Strict);
             mockery.registerMock('../sourceMaps/sourceMaps', { SourceMaps: function() { return mock.object; } });
 
@@ -289,12 +292,12 @@ suite('BaseSourceMapTransformer', () => {
             const response = testUtils.getStackTraceResponseBody(RUNTIME_PATH, RUNTIME_BPS(), [1, 2, 3]);
             const expected = testUtils.getStackTraceResponseBody(RUNTIME_PATH, RUNTIME_BPS());
 
-            getTransformer(/*sourceMaps=*/true, /*suppressDefaultMock=*/true).stackTraceResponse(response);
+            await getTransformer(/*sourceMaps=*/true, /*suppressDefaultMock=*/true).stackTraceResponse(response);
             assert.deepEqual(response, expected);
             mock.verifyAll();
         });
 
-        test(`clears the name and leaves the path when it can't be sourcemapped and doesn't exist on disk`, () => {
+        test(`clears the name and leaves the path when it can't be sourcemapped and doesn't exist on disk`, async () => {
             const mock = Mock.ofType(SourceMaps, MockBehavior.Strict);
             mockery.registerMock('../sourceMaps/sourceMaps', { SourceMaps: function() { return mock.object; } });
 
@@ -313,7 +316,7 @@ suite('BaseSourceMapTransformer', () => {
                 stackFrame.source.name =  RUNTIME_FILE;
             });
 
-            getTransformer(/*sourceMaps=*/true, /*suppressDefaultMock=*/true).stackTraceResponse(response);
+            await getTransformer(/*sourceMaps=*/true, /*suppressDefaultMock=*/true).stackTraceResponse(response);
             assert.deepEqual(response, expected);
             mock.verifyAll();
         });
@@ -325,10 +328,10 @@ class StubSourceMaps {
         return RUNTIME_PATH;
     }
 
-	/*
-	 * Map location in source language to location in generated code.
-	 * line and column are 0 based.
-	 */
+    /*
+     * Map location in source language to location in generated code.
+     * line and column are 0 based.
+     */
     public mapToGenerated(path: string, line: number, column: number): MappedPosition {
         const authored = AUTHORED_BPS();
         let i: number;
@@ -340,10 +343,10 @@ class StubSourceMaps {
         return { source: RUNTIME_PATH, line: mapping.line, column: mapping.column };
     }
 
-	/*
-	 * Map location in generated code to location in source language.
-	 * line and column are 0 based.
-	 */
+    /*
+     * Map location in generated code to location in source language.
+     * line and column are 0 based.
+     */
     public mapToAuthored(path: string, line: number, column: number): MappedPosition {
         const runtime = RUNTIME_BPS();
         let i: number;

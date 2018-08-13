@@ -7,9 +7,15 @@ import * as fs from 'fs';
 import * as url from 'url';
 import * as path from 'path';
 import * as glob from 'glob';
-import {Handles, logger} from 'vscode-debugadapter';
+import { Handles, logger } from 'vscode-debugadapter';
 import * as http from 'http';
 import * as https from 'https';
+
+import { IExecutionResultTelemetryProperties } from './telemetry';
+
+export interface IStringDictionary<T> {
+    [name: string]: T;
+}
 
 export const enum Platform {
     Windows, OSX, Linux
@@ -97,6 +103,11 @@ export function retryAsync(fn: () => Promise<any>, timeoutMs: number, intervalDe
     return tryUntilTimeout();
 }
 
+let caseSensitivePaths = true;
+export function setCaseSensitivePaths(useCaseSensitivePaths: boolean) {
+    caseSensitivePaths = useCaseSensitivePaths;
+}
+
 /**
  * Modify a url/path either from the client or the target to a common format for comparing.
  * The client can handle urls in this format too.
@@ -116,15 +127,32 @@ export function canonicalizeUrl(urlOrPath: string): string {
 
     urlOrPath = stripTrailingSlash(urlOrPath);
     urlOrPath = fixDriveLetterAndSlashes(urlOrPath);
+    if (!caseSensitivePaths) {
+        urlOrPath = normalizeIfFSIsCaseInsensitive(urlOrPath);
+    }
 
     return urlOrPath;
+}
+
+function normalizeIfFSIsCaseInsensitive(urlOrPath: string): string {
+    return isWindowsFilePath(urlOrPath)
+        ? urlOrPath.toLowerCase()
+        : urlOrPath;
+}
+
+function isWindowsFilePath(candidate: string): boolean {
+    return !!candidate.match(/[A-z]:[\\\/][^\\\/]/);
+}
+
+export function isFileUrl(candidate: string): boolean {
+    return candidate.startsWith('file:///');
 }
 
 /**
  * If urlOrPath is a file URL, removes the 'file:///', adjusting for platform differences
  */
 export function fileUrlToPath(urlOrPath: string): string {
-    if (urlOrPath.startsWith('file:///')) {
+    if (isFileUrl(urlOrPath)) {
         urlOrPath = urlOrPath.replace('file:///', '');
         urlOrPath = decodeURIComponent(urlOrPath);
         if (urlOrPath[0] !== '/' && !urlOrPath.match(/^[A-Za-z]:/)) {
@@ -145,7 +173,9 @@ export function fileUrlToPath(urlOrPath: string): string {
  * blah\something => blah/something
  */
 export function forceForwardSlashes(aUrl: string): string {
-    return aUrl.replace(/\\/g, '/');
+    return aUrl
+        .replace(/\\\//g, '/') // Replace \/ (unnecessarily escaped forward slash)
+        .replace(/\\/g, '/');
 }
 
 /**
@@ -218,11 +248,15 @@ export function errP(msg: string|Error): Promise<never> {
 /**
  * Helper function to GET the contents of a url
  */
-export function getURL(aUrl: string): Promise<string> {
+export function getURL(aUrl: string, options: https.RequestOptions = {}): Promise<string> {
     return new Promise((resolve, reject) => {
         const parsedUrl = url.parse(aUrl);
         const get = parsedUrl.protocol === 'https:' ? https.get : http.get;
-        const options = Object.assign({ rejectUnauthorized: false }, parsedUrl) as https.RequestOptions;
+        options = <https.RequestOptions>{
+            rejectUnauthorized: false,
+            ...parsedUrl,
+            ...options
+        };
 
         get(options, response => {
             let responseData = '';
@@ -250,6 +284,14 @@ export function isURL(urlOrPath: string): boolean {
     return urlOrPath && !path.isAbsolute(urlOrPath) && !!url.parse(urlOrPath).protocol;
 }
 
+export function isAbsolute(_path: string): boolean {
+    return _path.startsWith('/') || isAbsolute_win(_path);
+}
+
+export function isAbsolute_win(_path: string): boolean {
+    return /^[a-zA-Z]\:[\\\/]/.test(_path);
+}
+
 /**
  * Strip a string from the left side of a string
  */
@@ -264,8 +306,13 @@ export function lstrip(s: string, lStr: string): string {
  * C:/code/app.js => file:///C:/code/app.js
  * /code/app.js => file:///code/app.js
  */
-export function pathToFileURL(absPath: string): string {
+export function pathToFileURL(absPath: string, normalize?: boolean): string {
     absPath = forceForwardSlashes(absPath);
+    if (normalize) {
+        absPath = path.normalize(absPath);
+        absPath = forceForwardSlashes(absPath);
+    }
+
     absPath = (absPath.startsWith('/') ? 'file://' : 'file:///') +
         absPath;
     return encodeURI(absPath);
@@ -380,7 +427,7 @@ export function multiGlob(patterns: string[], opts?: any): Promise<string[]> {
                 }
             });
         });
-    })).then(results =>  {
+    })).then(results => {
         const set = new Set<string>();
         for (let paths of results) {
             for (let p of paths) {
@@ -428,7 +475,7 @@ export class ReverseHandles<T> extends Handles<T> {
 /**
  * Return a regex for the given path to set a breakpoint on
  */
-export function pathToRegex(aPath: string, caseSensitive: boolean): string {
+export function pathToRegex(aPath: string): string {
     const fileUrlPrefix = 'file:///';
     let isFileUrl = aPath.startsWith(fileUrlPrefix);
     if (isFileUrl) {
@@ -441,7 +488,7 @@ export function pathToRegex(aPath: string, caseSensitive: boolean): string {
 
     // If we should resolve paths in a case-sensitive way, we still need to set the BP for either an
     // upper or lowercased drive letter
-    if (caseSensitive) {
+    if (caseSensitivePaths) {
         if (aPath.match(/^[a-zA-Z]:/)) {
             const driveLetter = aPath.charAt(0);
             const u = driveLetter.toUpperCase();
@@ -460,9 +507,9 @@ export function pathToRegex(aPath: string, caseSensitive: boolean): string {
 }
 
 export function pathGlobToBlackboxedRegex(glob: string): string {
-    return escapeRegexSpecialCharsForBlackbox(glob)
+    return escapeRegexSpecialChars(glob, '*')
+        .replace(/([^*]|^)\*([^*]|$)/g, '$1.*$2') // * -> .*
         .replace(/\*\*(\\\/|\\\\)?/g, '(.*\\\/)?') // **/ -> (.*\/)?
-        .replace(/([^\.]|^)\*/g, '$1.*') // * -> .*
 
         // Just to simplify
         .replace(/\.\*\\\/\.\*/g, '.*') // .*\/.* -> .*
@@ -472,15 +519,16 @@ export function pathGlobToBlackboxedRegex(glob: string): string {
         .replace(/\\\/|\\\\/g, '[\/\\\\]'); // / -> [/|\], \ -> [/|\]
 }
 
-function escapeRegexSpecialChars(str: string): string {
-    return str.replace(/([/\\.?*()^${}|[\]+])/g, '\\$1');
-}
+const regexChars = '/\\.?*()^${}|[]+';
+export function escapeRegexSpecialChars(str: string, except?: string): string {
+    const useRegexChars = regexChars
+        .split('')
+        .filter(c => !except || except.indexOf(c) < 0)
+        .join('')
+        .replace(/[\\\]]/g, '\\$&');
 
-/**
- * Does not escape *, as str is a simple glob pattern
- */
-function escapeRegexSpecialCharsForBlackbox(str: string): string {
-    return str.replace(/([/\\.?()^${}|[\]+])/g, '\\$1');
+    const r = new RegExp(`[${useRegexChars}]`, 'g');
+    return str.replace(r, '\\$&');
 }
 
 export function trimLastNewline(str: string): string {
@@ -519,22 +567,72 @@ export function uppercaseFirstLetter(str: string): string {
     return str.substr(0, 1).toUpperCase() + str.substr(1);
 }
 
-export type Partial<T> = {
-    [P in keyof T]?: T[P];
-};
-
 export function getLine(msg: string, n = 0): string {
     return msg.split('\n')[n];
 }
 
 export function firstLine(msg: string): string {
-    return getLine(msg);
+    return getLine(msg || '');
 }
 
 export function isNumber(num: number): boolean {
     return typeof num === 'number';
 }
 
-export function escapeRegExpCharacters(value: string): string {
-    return value.replace(/[\-\\\{\}\*\+\?\|\^\$\.\[\]\(\)\#]/g, '\\$&');
+export function toVoidP(p: Promise<any>): Promise<void> {
+    return p.then(() => { });
+}
+
+export interface PromiseDefer<T> {
+    promise: Promise<void>;
+    resolve: (value?: T | PromiseLike<T>) => void;
+    reject: (reason?: any) => void;
+}
+
+export function promiseDefer<T>(): PromiseDefer<T> {
+    let resolveCallback;
+    let rejectCallback;
+    const promise = new Promise<void>((resolve, reject) => {
+        resolveCallback = resolve;
+        rejectCallback = reject;
+    });
+
+    return { promise, resolve: resolveCallback, reject: rejectCallback };
+}
+
+export type HighResTimer = [number, number];
+
+export function calculateElapsedTime(startProcessingTime: HighResTimer): number {
+    const NanoSecondsPerMillisecond = 1000000;
+    const NanoSecondsPerSecond = 1e9;
+
+    const ellapsedTime = process.hrtime(startProcessingTime);
+    const ellapsedMilliseconds = (ellapsedTime[0] * NanoSecondsPerSecond + ellapsedTime[1]) / NanoSecondsPerMillisecond;
+    return ellapsedMilliseconds;
+}
+
+// Pattern: The pattern recognizes file paths and captures the file name and the colon at the end.
+// Next line is a sample path aligned with the regexp parts that recognize it/match it. () is for the capture group
+//                                C  :     \  foo      \  (in.js:)
+//                                C  :     \  foo\ble  \  (fi.ts:)
+const extractFileNamePattern = /[A-z]:(?:[\\/][^:]*)+[\\/]([^:]*:)/g;
+
+export function fillErrorDetails(properties: IExecutionResultTelemetryProperties, e: any): void {
+    properties.exceptionMessage = e.message || e.toString();
+    if (e.name) {
+        properties.exceptionName = e.name;
+    }
+    if (typeof e.stack === 'string') {
+        let unsanitizedStack = e.stack;
+        try {
+            // We remove the file path, we just leave the file names
+            unsanitizedStack = unsanitizedStack.replace(extractFileNamePattern, '$1');
+        } catch (exception) {
+            // Ignore error while sanitizing the call stack
+        }
+        properties.exceptionStack = unsanitizedStack;
+    }
+    if (e.id) {
+        properties.exceptionId = e.id.toString();
+    }
 }

@@ -2,12 +2,12 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {DebugProtocol} from 'vscode-debugprotocol';
+import { DebugProtocol } from 'vscode-debugprotocol';
 
-import {IInternalStackTraceResponseBody, IInternalStackFrame} from '../src/debugAdapterInterfaces';
+import { IInternalStackTraceResponseBody, IInternalStackFrame } from '../src/debugAdapterInterfaces';
 import * as utils from '../src/utils';
 
-import {Mock, It, MockBehavior} from 'typemoq';
+import { Mock, It, MockBehavior, IMock } from 'typemoq';
 import * as path from 'path';
 import * as mockery from 'mockery';
 import * as fs from 'fs';
@@ -81,6 +81,17 @@ export function registerOSXMocks(): void {
     mockery.registerMock('path', path.posix);
 }
 
+export function registerLocMocks(): void {
+    mockery.registerMock('vscode-nls', {
+        config: () => () => dummyLocalize,
+        loadMessageBundle: () => dummyLocalize
+    });
+}
+
+function dummyLocalize(id: string, englishString: string): string {
+    return englishString;
+}
+
 /**
  * path.resolve + fixing the drive letter to match what VS Code does. Basically tests can use this when they
  * want to force a path to native slashes and the correct letter case, but maybe can't use un-mocked utils.
@@ -110,22 +121,26 @@ export function registerMockReadFile(...entries: { absPath: string; data: string
  * Mock utils.getURL to return the specified contents.
  * Note that if you call this twice, the second call will overwrite the first.
  */
-export function registerMockGetURL(utilsRelativePath: string, url: string, contents: string, utilsMock?: Mock<typeof utils>, isError = false): void {
+export function registerMockGetURL(utilsRelativePath: string, url: string, contents: string, utilsMock?: IMock<typeof utils>, isError = false): void {
     if (!utilsMock) {
         utilsMock = Mock.ofInstance(utils);
         utilsMock.callBase = true;
         mockery.registerMock(utilsRelativePath, utilsMock.object);
     }
 
+    // Need to register with and without options
+    utilsMock
+        .setup(x => x.getURL(It.isValue(url), It.isAny()))
+        .returns(() => isError ? Promise.reject(new Error(contents)) : Promise.resolve(contents));
     utilsMock
         .setup(x => x.getURL(It.isValue(url)))
-        .returns(() => isError ? Promise.reject(contents) : Promise.resolve(contents));
+        .returns(() => isError ? Promise.reject(new Error(contents)) : Promise.resolve(contents));
     utilsMock
         .setup(x => x.isURL(It.isValue(url)))
         .returns(() => true);
 }
 
-export function registerMockGetURLFail(utilsRelativePath: string, url: string, failContents?: string, utilsMock?: Mock<typeof utils>): void {
+export function registerMockGetURLFail(utilsRelativePath: string, url: string, failContents?: string, utilsMock?: IMock<typeof utils>): void {
     return registerMockGetURL(utilsRelativePath, url, failContents, utilsMock, /*isError=*/true);
 }
 

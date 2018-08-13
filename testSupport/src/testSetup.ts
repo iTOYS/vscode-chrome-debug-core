@@ -8,9 +8,9 @@ import { DebugProtocol } from 'vscode-debugprotocol';
 import {ExtendedDebugClient} from './debugClient';
 
 // ES6 default export...
+// tslint:disable-next-line:no-var-requires
 const LoggingReporter = require('./loggingReporter');
-
-let dc: ExtendedDebugClient;
+// LoggingReporter.alwaysDumpLogs = true;
 
 let unhandledAdapterErrors: string[];
 const origTest = test;
@@ -63,28 +63,42 @@ function log(e: DebugProtocol.OutputEvent): void {
     if (msg.indexOf('********') >= 0) unhandledAdapterErrors.push(msg);
 }
 
-let patchLaunchArgsCb: Function;
-function patchLaunchArgFns(): void {
-    function patchLaunchArgs(launchArgs): void {
+export type PatchLaunchArgsCb = (launchArgs: any) => Promise<void> | void;
+
+let dc: ExtendedDebugClient;
+function patchLaunchFn(patchLaunchArgsCb: PatchLaunchArgsCb): void {
+    function patchLaunchArgs(launchArgs): Promise<void> {
         launchArgs.trace = 'verbose';
-        patchLaunchArgsCb(launchArgs);
+        const patchReturnVal = patchLaunchArgsCb(launchArgs);
+        return patchReturnVal || Promise.resolve();
     }
 
     const origLaunch = dc.launch;
     dc.launch = (launchArgs: any) => {
-        patchLaunchArgs(launchArgs);
-        return origLaunch.call(dc, launchArgs);
+        return patchLaunchArgs(launchArgs)
+            .then(() => origLaunch.call(dc, launchArgs));
     };
 }
 
-export function setup(entryPoint: string, type: string, patchLaunchArgs?: Function, port?: number): Promise<ExtendedDebugClient> {
+export interface ISetupOpts {
+    entryPoint: string;
+    type: string;
+    patchLaunchArgs?: PatchLaunchArgsCb;
+    port?: number;
+    alwaysDumpLogs?: boolean;
+}
+
+export function setup(opts: ISetupOpts): Promise<ExtendedDebugClient> {
     unhandledAdapterErrors = [];
-    patchLaunchArgsCb = patchLaunchArgs;
-    dc = new ExtendedDebugClient('node', entryPoint, type);
-    patchLaunchArgFns();
+    dc = new ExtendedDebugClient('node', opts.entryPoint, opts.type);
+    if (opts.patchLaunchArgs) {
+        patchLaunchFn(opts.patchLaunchArgs);
+    }
+
+    LoggingReporter.alwaysDumpLogs = opts.alwaysDumpLogs;
     dc.addListener('output', log);
 
-    return dc.start(port)
+    return dc.start(opts.port)
         .then(() => dc);
 }
 
