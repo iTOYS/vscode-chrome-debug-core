@@ -16,17 +16,21 @@ import { IDebugAdapter } from '../debugAdapterInterfaces';
 import { telemetry, ExceptionType, IExecutionResultTelemetryProperties, TelemetryPropertyCollector, ITelemetryPropertyCollector } from '../telemetry';
 import * as utils from '../utils';
 import { ExecutionTimingsReporter, StepProgressEventsEmitter, IObservableEvents, IStepStartedEventsEmitter, IFinishedStartingUpEventsEmitter } from '../executionTimingsReporter';
+import { Breakpoints } from './breakpoints';
+import { ScriptContainer } from '../chrome/scripts';
 
 export interface IChromeDebugAdapterOpts {
     targetFilter?: ITargetFilter;
     logFilePath?: string; // obsolete, vscode log dir should be used
-    enableSourceMapCaching?: boolean;
 
     // Override services
     chromeConnection?: typeof ChromeConnection;
     pathTransformer?: { new(): BasePathTransformer };
-    sourceMapTransformer?: { new(sourceHandles: any, enableSourcemapCaching?: boolean): BaseSourceMapTransformer };
+    sourceMapTransformer?: { new(sourceHandles: any): BaseSourceMapTransformer };
     lineColTransformer?: { new(session: any): LineColTransformer };
+
+    breakpoints?: typeof Breakpoints;
+    scriptContainer?: typeof ScriptContainer;
 }
 
 export interface IChromeDebugSessionOpts extends IChromeDebugAdapterOpts {
@@ -284,6 +288,26 @@ export class ChromeDebugSession extends LoggingDebugSession implements IObservab
         this.reportTimingsWhileStartingUpIfNeeded(/*requestedContentWasDetected*/false, /*reasonForNotDetected*/'shutdown');
         super.shutdown();
     }
+
+    public sendResponse(response: DebugProtocol.Response): void {
+        const originalLogVerbose = logger.verbose;
+        try {
+            logger.verbose = textToLog => {
+                if (response && response.command === 'source' && response.body && response.body.content) {
+                    const clonedResponse = Object.assign({}, response);
+                    clonedResponse.body = Object.assign({}, response.body);
+                    clonedResponse.body.content = '<removed script source for logs>';
+                    return originalLogVerbose.call(logger, `To client: ${JSON.stringify(clonedResponse)}`);
+                } else {
+                    return originalLogVerbose.call(logger, textToLog);
+                }
+            };
+            super.sendResponse(response);
+        } finally {
+            logger.verbose = originalLogVerbose;
+        }
+    }
+
 }
 
 function logVersionInfo(): void {

@@ -4,6 +4,7 @@
 
 import * as os from 'os';
 import * as fs from 'fs';
+import * as util from 'util';
 import * as url from 'url';
 import * as path from 'path';
 import * as glob from 'glob';
@@ -34,6 +35,19 @@ export function getPlatform(): Platform {
 export function existsSync(path: string): boolean {
     try {
         fs.statSync(path);
+        return true;
+    } catch (e) {
+        // doesn't exist
+        return false;
+    }
+}
+
+/**
+ * Node's fs.exists is deprecated, implement it in terms of stat
+ */
+export async function exists(path: string): Promise<boolean> {
+    try {
+        await util.promisify(fs.stat)(path);
         return true;
     } catch (e) {
         // doesn't exist
@@ -118,6 +132,9 @@ export function setCaseSensitivePaths(useCaseSensitivePaths: boolean) {
  * http://site.com/ => http://site.com
  */
 export function canonicalizeUrl(urlOrPath: string): string {
+    if (urlOrPath == null) {
+        return urlOrPath;
+    }
     urlOrPath = fileUrlToPath(urlOrPath);
 
     // Remove query params
@@ -163,6 +180,16 @@ export function fileUrlToPath(urlOrPath: string): string {
         }
 
         urlOrPath = fixDriveLetterAndSlashes(urlOrPath);
+    }
+
+    return urlOrPath;
+}
+
+export function fileUrlToNetworkPath(urlOrPath: string): string {
+    if (isFileUrl(urlOrPath)) {
+        urlOrPath = urlOrPath.replace('file:///', '\\\\');
+        urlOrPath = urlOrPath.replace(/\//g, '\\');
+        urlOrPath = urlOrPath = decodeURIComponent(urlOrPath);
     }
 
     return urlOrPath;
@@ -285,11 +312,7 @@ export function isURL(urlOrPath: string): boolean {
 }
 
 export function isAbsolute(_path: string): boolean {
-    return _path.startsWith('/') || isAbsolute_win(_path);
-}
-
-export function isAbsolute_win(_path: string): boolean {
-    return /^[a-zA-Z]\:[\\\/]/.test(_path);
+    return path.posix.isAbsolute(_path) || path.win32.isAbsolute(_path);
 }
 
 /**
@@ -305,16 +328,20 @@ export function lstrip(s: string, lStr: string): string {
  * Convert a local path to a file URL, like
  * C:/code/app.js => file:///C:/code/app.js
  * /code/app.js => file:///code/app.js
+ * \\code\app.js => file:///code/app.js
  */
-export function pathToFileURL(absPath: string, normalize?: boolean): string {
-    absPath = forceForwardSlashes(absPath);
+export function pathToFileURL(_absPath: string, normalize?: boolean): string {
+    let absPath = forceForwardSlashes(_absPath);
     if (normalize) {
         absPath = path.normalize(absPath);
         absPath = forceForwardSlashes(absPath);
     }
 
-    absPath = (absPath.startsWith('/') ? 'file://' : 'file:///') +
-        absPath;
+    const filePrefix = _absPath.startsWith('\\\\') ? 'file:/' :
+        absPath.startsWith('/') ? 'file://' :
+            'file:///';
+
+    absPath = filePrefix + absPath;
     return encodeURI(absPath);
 }
 
@@ -477,24 +504,30 @@ export class ReverseHandles<T> extends Handles<T> {
  */
 export function pathToRegex(aPath: string): string {
     const fileUrlPrefix = 'file:///';
-    let isFileUrl = aPath.startsWith(fileUrlPrefix);
+    const isFileUrl = aPath.startsWith(fileUrlPrefix);
+    const isAbsolutePath = isAbsolute(aPath);
     if (isFileUrl) {
         // Purposely avoiding fileUrlToPath/pathToFileUrl for this, because it does decodeURI/encodeURI
-        // for special URL chars and I don't want to think about that interacting with special regex chars
+        // for special URL chars and I don't want to think about that interacting with special regex chars.
+        // Strip file://, process as a regex, then add file: back at the end.
         aPath = aPath.substr(fileUrlPrefix.length);
     }
 
-    aPath = escapeRegexSpecialChars(aPath);
+    if (isURL(aPath) || isFileUrl || !isAbsolutePath) {
+        aPath = escapeRegexSpecialChars(aPath);
+    } else {
+        const escapedAPath = escapeRegexSpecialChars(aPath);
+        aPath = `${escapedAPath}|${escapeRegexSpecialChars(pathToFileURL(aPath))}`;
+    }
 
     // If we should resolve paths in a case-sensitive way, we still need to set the BP for either an
     // upper or lowercased drive letter
     if (caseSensitivePaths) {
-        if (aPath.match(/^[a-zA-Z]:/)) {
-            const driveLetter = aPath.charAt(0);
-            const u = driveLetter.toUpperCase();
-            const l = driveLetter.toLowerCase();
-            aPath = `[${u}${l}]${aPath.substr(1)}`;
-        }
+        aPath = aPath.replace(/(^|file:\\\/\\\/\\\/)([a-zA-Z]):/g, (match, prefix, letter) => {
+            const u = letter.toUpperCase();
+            const l = letter.toLowerCase();
+            return `${prefix}[${u}${l}]:`;
+        });
     } else {
         aPath = aPath.replace(/[a-zA-Z]/g, letter => `[${letter.toLowerCase()}${letter.toUpperCase()}]`);
     }
@@ -546,7 +579,7 @@ function blackboxNegativeLookaheadPattern(aPath: string): string {
 export function makeRegexNotMatchPath(regex: RegExp, aPath: string): RegExp {
     if (regex.test(aPath)) {
         const regSourceWithoutCaret = regex.source.replace(/^\^/, '');
-        const source = `^${blackboxNegativeLookaheadPattern(aPath)}.*${regSourceWithoutCaret}`;
+        const source = `^${blackboxNegativeLookaheadPattern(aPath)}.*(${regSourceWithoutCaret})`;
         return new RegExp(source, 'i');
     } else {
         return regex;
@@ -634,5 +667,29 @@ export function fillErrorDetails(properties: IExecutionResultTelemetryProperties
     }
     if (e.id) {
         properties.exceptionId = e.id.toString();
+    }
+}
+
+/**
+ * Join path segments properly based on whether they appear to be c:/ -style or / style.
+ * Note - must check posix first because win32.isAbsolute includes posix.isAbsolute
+ */
+export function properJoin(...segments: string[]): string {
+    if (path.posix.isAbsolute(segments[0])) {
+        return path.posix.join(...segments);
+    } else if (path.win32.isAbsolute(segments[0])) {
+        return path.win32.join(...segments);
+    } else {
+        return path.join(...segments);
+    }
+}
+
+export function properResolve(...segments: string[]): string {
+    if (path.posix.isAbsolute(segments[0])) {
+        return path.posix.resolve(...segments);
+    } else if (path.win32.isAbsolute(segments[0])) {
+        return path.win32.resolve(...segments);
+    } else {
+        return path.resolve(...segments);
     }
 }

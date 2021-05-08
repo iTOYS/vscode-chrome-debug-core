@@ -21,7 +21,7 @@ suite('ConsoleHelper', () => {
      * Test helper valid when the message consists only of strings that will be collapsed to one string
      */
     function doAssertForString(params: Crdp.Runtime.ConsoleAPICalledEvent, expectedText: string, expectedIsError = false): void {
-        const result = ConsoleHelper.formatConsoleArguments(params);
+        const result = ConsoleHelper.formatConsoleArguments(params.type, params.args, params.stackTrace);
 
         // Strings are collapsed to one string
         assert.equal(result.args.length, 1);
@@ -57,8 +57,28 @@ suite('ConsoleHelper', () => {
             doAssertForString(Runtime.makeLog('test', null, undefined), 'test null undefined');
         });
 
-        test('strips %c patterns', () => {
-            doAssertForString(Runtime.makeLog('foo %cbar', 'color: red'), 'foo bar');
+        test('handles %c patterns for color', () => {
+            doAssertForString(Runtime.makeLog('foo %cbar', 'color: red'), 'foo \x1b[0;91mbar');
+        });
+
+        test('handles empty %c patterns to reset color', () => {
+            doAssertForString(Runtime.makeLog('%cfoo %cbar', 'color: red', 'color:'), '\x1b[0;91mfoo \x1b[0mbar');
+        });
+
+        test('handles %c patterns with font-weight', () => {
+            doAssertForString(Runtime.makeLog('foo %cbar', 'font-weight: bold'), 'foo \x1b[0;1mbar');
+        });
+
+        test('handles %c patterns with background', () => {
+          doAssertForString(Runtime.makeLog('foo %cbar', 'background: red'), 'foo \x1b[0;101mbar');
+        });
+
+        test('handles %c patterns with text-decoration', () => {
+          doAssertForString(Runtime.makeLog('foo %cbar', 'text-decoration: underline'), 'foo \x1b[0;4mbar');
+        });
+
+        test('handles %c patterns with multiple attributes', () => {
+          doAssertForString(Runtime.makeLog('foo %cbar', 'color: red; background: blue; font-weight: bold; text-decoration: underline'), 'foo \x1b[0;91;104;1;4mbar');
         });
 
         test('starts with non-string', () => {
@@ -74,7 +94,7 @@ suite('ConsoleHelper', () => {
         });
 
         test('string and object', () => {
-            const result = ConsoleHelper.formatConsoleArguments(Runtime.makeLog('foo', '$obj', 'bar'));
+            const result = ConsoleHelper.formatConsoleArguments('log', Runtime.makeArgs('foo', '$obj', 'bar'));
             assert.equal(result.isError, false);
             assert.equal(result.args.length, 3);
             assert.equal(result.args[0].value, 'foo');
@@ -83,7 +103,7 @@ suite('ConsoleHelper', () => {
         });
 
         test('formatted strings and object', () => {
-            const result = ConsoleHelper.formatConsoleArguments(Runtime.makeLog('foo %d', 1, '$obj'));
+            const result = ConsoleHelper.formatConsoleArguments('log', Runtime.makeArgs('foo %d', 1, '$obj'));
             assert.equal(result.isError, false);
             assert.equal(result.args.length, 2);
             assert.equal(result.args[0].value, 'foo 1');
@@ -91,27 +111,25 @@ suite('ConsoleHelper', () => {
         });
 
         test('object formatted as num', () => {
-            const result = ConsoleHelper.formatConsoleArguments(Runtime.makeLog('foo %d', '$obj'));
+            const result = ConsoleHelper.formatConsoleArguments('log', Runtime.makeArgs('foo %d', '$obj'));
             assert.equal(result.isError, false);
             assert.equal(result.args.length, 1);
             assert.equal(result.args[0].value, 'foo NaN');
         });
 
         test('object formatted as string', () => {
-            const result = ConsoleHelper.formatConsoleArguments(Runtime.makeLog('foo %s', '$obj'));
+            const result = ConsoleHelper.formatConsoleArguments('log', Runtime.makeArgs('foo %s', '$obj'));
             assert.equal(result.isError, false);
             assert.equal(result.args.length, 1);
             assert.equal(result.args[0].value, 'foo Object');
         });
 
         test('unimplemented console method', () => {
-            const tableMessage = Runtime.makeLog('foo');
-            tableMessage.type = 'table';
-            assert.equal(ConsoleHelper.formatConsoleArguments(tableMessage), null);
+            assert.equal(ConsoleHelper.formatConsoleArguments('table', Runtime.makeArgs('foo')), null);
         });
 
         test('%O with object', () => {
-            const result = ConsoleHelper.formatConsoleArguments(Runtime.makeLog('foo %O bar %O test', '$obj', '$obj'));
+            const result = ConsoleHelper.formatConsoleArguments('log', Runtime.makeArgs('foo %O bar %O test', '$obj', '$obj'));
             assert.equal(result.isError, false);
             assert.equal(result.args.length, 5);
             assert.equal(result.args[0].value, 'foo ');
@@ -122,7 +140,7 @@ suite('ConsoleHelper', () => {
         });
 
         test('text params recombined after object arg', () => {
-            const result = ConsoleHelper.formatConsoleArguments(Runtime.makeLog('foo', '$obj', 'bar', 'test', '$obj', 'bar2', 'test2'));
+            const result = ConsoleHelper.formatConsoleArguments('log', Runtime.makeArgs('foo', '$obj', 'bar', 'test', '$obj', 'bar2', 'test2'));
             assert.equal(result.isError, false);
             assert.equal(result.args.length, 5);
             assert.equal(result.args[0].value, 'foo');
@@ -150,19 +168,12 @@ namespace Runtime {
      * @param params - The list of parameters passed to the log function
      * @param overrideProps - An object of props that the message should have. The rest are filled in with defaults.
      */
-    function makeMockMessage(type: string, args: any[], overrideProps?: any): Crdp.Runtime.ConsoleAPICalledEvent {
+    function makeMockMessage(type: string, args: (string | number | null | undefined)[], overrideProps?: any): Crdp.Runtime.ConsoleAPICalledEvent {
         const message: Crdp.Runtime.ConsoleAPICalledEvent = <any>{
             type,
             executionContextId: 2,
             timestamp: Date.now(),
-            args: args.map(param => {
-                const remoteObj = { type: typeof param, value: param, description: '' + param };
-                if (param === null) {
-                    (<any>remoteObj).subtype = 'null';
-                }
-
-                return remoteObj;
-            })
+            args: makeArgs(...args)
         };
 
         if (overrideProps) {
@@ -180,20 +191,29 @@ namespace Runtime {
      * Returns a mock ConsoleAPICalledEvent with the given argument values.
      * You can pass '$obj' to get an object.
      */
-    export function makeLog(...args: any[]): Crdp.Runtime.ConsoleAPICalledEvent {
+    export function makeLog(...args: (string | number | null | undefined)[]): Crdp.Runtime.ConsoleAPICalledEvent {
         const msg = makeMockMessage('log', args);
-        msg.args.forEach(arg => {
-            if (arg.value === '$obj') {
-                arg.value = undefined;
-                arg.type = 'object';
-                arg.description = 'Object';
-                arg.objectId = '$obj';
+        return msg;
+    }
+
+    export function makeArgs(...args: (string | number | null | undefined)[]): Crdp.Runtime.RemoteObject[] {
+        return args.map(arg => {
+            if (arg === '$obj') {
+                return <Crdp.Runtime.RemoteObject>{
+                    value: undefined,
+                    type: 'object',
+                    description: 'Object',
+                    objectId: '$obj',
+                };
             }
 
-            return arg;
-        });
+            const remoteObj = { type: typeof arg, value: arg, description: '' + arg };
+            if (arg === null) {
+                (<any>remoteObj).subtype = 'null';
+            }
 
-        return msg;
+            return remoteObj;
+        });
     }
 
     export function makeAssert(...args: any[]): Crdp.Runtime.ConsoleAPICalledEvent {

@@ -283,6 +283,11 @@ suite('Utils', () => {
             assert.equal(getUtils().pathToFileURL('c:\\code\\app.js'), 'file:///c:/code/app.js');
         });
 
+        test('converts network path paths', () => {
+            assert.equal(getUtils().pathToFileURL('\\\\foo bar\\something'), 'file:///foo%20bar/something');
+            assert.equal(getUtils().pathToFileURL('\\\\localhost\\c$\\app.js'), 'file:///localhost/c$/app.js');
+        });
+
         test('converts unix-style paths', () => {
             assert.equal(getUtils().pathToFileURL('/code/app.js'), 'file:///code/app.js');
         });
@@ -302,11 +307,11 @@ suite('Utils', () => {
         }
 
         test('works for a simple posix path', () => {
-            testPathToRegex('/a/b.js', '\\/a\\/b\\.js');
+            testPathToRegex('/a/b.js', '\\/a\\/b\\.js|file:\\/\\/\\/a\\/b\\.js');
         });
 
         test('works for a simple windows path', () => {
-            testPathToRegex('c:\\a\\b.js', '[Cc]:\\\\a\\\\b\\.js');
+            testPathToRegex('c:\\a\\b.js', '[Cc]:\\\\a\\\\b\\.js|file:\\/\\/\\/[Cc]:\\/a\\/b\\.js');
         });
 
         test('works for a url', () => {
@@ -319,6 +324,10 @@ suite('Utils', () => {
 
         test('escapes the drive letter for a windows file url', () => {
             testPathToRegex('file:///c:\\a\\b.js', 'file:\\/\\/\\/[Cc]:\\\\a\\\\b\\.js');
+        });
+
+        test('space in path', () => {
+            testPathToRegex('/a/space path.js', '\\/a\\/space path\\.js|file:\\/\\/\\/a\\/space%20path\\.js');
         });
     });
 
@@ -334,11 +343,11 @@ suite('Utils', () => {
         }
 
         test('works for a simple posix path', () => {
-            testPathToRegex('/a/b.js', '\\/[aA]\\/[bB]\\.[jJ][sS]');
+            testPathToRegex('/a/b.js', '\\/[aA]\\/[bB]\\.[jJ][sS]|[fF][iI][lL][eE]:\\/\\/\\/[aA]\\/[bB]\\.[jJ][sS]');
         });
 
         test('works for a simple windows path', () => {
-            testPathToRegex('c:\\a\\b.js', '[cC]:\\\\[aA]\\\\[bB]\\.[jJ][sS]');
+            testPathToRegex('c:\\a\\b.js', '[cC]:\\\\[aA]\\\\[bB]\\.[jJ][sS]|[fF][iI][lL][eE]:\\/\\/\\/[cC]:\\/[aA]\\/[bB]\\.[jJ][sS]');
         });
 
         test('works for a url', () => {
@@ -448,27 +457,12 @@ suite('Utils', () => {
         });
     });
 
-    suite('isAbsolute_win', () => {
-        test('true for windows-style absolute paths', () => {
+    suite('fileUrlToNetworkPath', () => {
+        test('true for network paths', () => {
             [
-                'c:/foo/bar/blah.js',
-                'c:/',
-                'z:/foo',
-                'z:\\',
-                'z:\\foo',
-            ].forEach(testPath => assert(getUtils().isAbsolute_win(testPath)));
-        });
-
-        test('false for everything else', () => {
-            [
-                'c :/foo/bar/blah.js',
-                'c:',
-                'ö:/foo',
-                '/foo/bar',
-                'foo/bar',
-                '',
-                'file:///foo/bar/blah.js',
-            ].forEach(testPath => assert.equal(getUtils().isAbsolute_win(testPath), false));
+                ['file:///foo%20bar/something', '\\\\foo bar\\something'],
+                ['file:///localhost/c$/app.js', '\\\\localhost\\c$\\app.js']
+            ].forEach(([testPath, expected]) => assert.equal(getUtils().fileUrlToNetworkPath(testPath), expected));
         });
     });
 });

@@ -15,6 +15,7 @@ import * as testUtils from '../testUtils';
 import { SourceMaps } from '../../src/sourceMaps/sourceMaps';
 import { MappedPosition } from '../../src/sourceMaps/sourceMap';
 import * as utils from '../../src/utils';
+import * as remoteMapper from '../../src/remoteMapper';
 
 /* tslint:disable:no-function-expression */
 
@@ -51,6 +52,7 @@ import {BaseSourceMapTransformer as _BaseSourceMapTransformer } from '../../src/
 
 suite('BaseSourceMapTransformer', () => {
     let utilsMock: IMock<typeof utils>;
+    let remoteMapperMock: IMock<typeof remoteMapper>;
 
     setup(() => {
         testUtils.setupUnhandledRejectionListener();
@@ -59,6 +61,10 @@ suite('BaseSourceMapTransformer', () => {
         utilsMock = Mock.ofInstance(utils);
         utilsMock.callBase = true;
         mockery.registerMock('../utils', utilsMock.object);
+
+        remoteMapperMock = Mock.ofInstance(remoteMapper);
+        remoteMapperMock.callBase = true;
+        mockery.registerMock('../remoteMapper', remoteMapperMock.object);
 
         // Set up mockery
         mockery.enable({ warnOnReplace: false, useCleanCache: true, warnOnUnregistered: false });
@@ -162,7 +168,7 @@ suite('BaseSourceMapTransformer', () => {
                 .setup(x => x.allMappedSources(It.isValue(RUNTIME_PATH)))
                 .returns(() => [AUTHORED_PATH]).verifiable();
             mock
-                .setup(x => x.processNewSourceMap(It.isValue(RUNTIME_PATH), It.isValue(sourceMapURL)))
+                .setup(x => x.processNewSourceMap(It.isValue(RUNTIME_PATH), undefined, It.isValue(sourceMapURL)))
                 .returns(() => Promise.resolve()).verifiable();
             args.breakpoints.forEach((bp, i) => {
                 mock
@@ -175,7 +181,7 @@ suite('BaseSourceMapTransformer', () => {
             assert.deepEqual(args, expected);
             mock.verifyAll();
 
-            await transformer.scriptParsed(RUNTIME_PATH, sourceMapURL);
+            await transformer.scriptParsed(RUNTIME_PATH, undefined, sourceMapURL);
             // return setBreakpointsP;
         });
 
@@ -215,7 +221,7 @@ suite('BaseSourceMapTransformer', () => {
                     source: { path: AUTHORED_PATH },
                     breakpoints: AUTHORED_BPS()
                 }, 0);
-                transformer.setBreakpointsResponse(response, 0);
+                response.breakpoints = transformer.setBreakpointsResponse(response.breakpoints, true, 0);
                 assert.deepEqual(response, expected);
             });
 
@@ -228,7 +234,7 @@ suite('BaseSourceMapTransformer', () => {
                     source: { path: RUNTIME_PATH },
                     breakpoints: RUNTIME_BPS()
                 }, 0);
-                transformer.setBreakpointsResponse(response, 0);
+                response.breakpoints = transformer.setBreakpointsResponse(response.breakpoints, true, 0);
                 assert.deepEqual(response, expected);
             });
 
@@ -248,7 +254,7 @@ suite('BaseSourceMapTransformer', () => {
                 const transformer = getTransformer(/*sourceMaps=*/true, /*suppressDefaultMock=*/true);
                 transformer.setBreakpoints(setBPArgs, /*requestSeq=*/0);
                 transformer.setBreakpoints(setBPArgs2, /*requestSeq=*/1);
-                transformer.setBreakpointsResponse(response, /*requestSeq=*/1);
+                response.breakpoints = transformer.setBreakpointsResponse(response.breakpoints, true, /*requestSeq=*/1);
 
                 assert.deepEqual(response, expected);
                 mock.verifyAll();
@@ -260,6 +266,21 @@ suite('BaseSourceMapTransformer', () => {
         test('modifies the response stackFrames', async () => {
             utilsMock
                 .setup(x => x.existsSync(It.isValue(AUTHORED_PATH)))
+                .returns(() => true);
+
+            const response = testUtils.getStackTraceResponseBody(RUNTIME_PATH, RUNTIME_BPS(), [1, 2, 3]);
+            const expected = testUtils.getStackTraceResponseBody(AUTHORED_PATH, AUTHORED_BPS(), undefined, /*isSourceMapped=*/true);
+
+            await getTransformer().stackTraceResponse(response);
+            assert.deepEqual(response, expected);
+        });
+
+        test(`apply to mapped source when using internal remote url`, async () => {
+            utilsMock
+                .setup(x => x.existsSync(It.isValue(AUTHORED_PATH)))
+                .returns(() => false);
+            remoteMapperMock
+                .setup(x => x.isInternalRemotePath(It.isValue(AUTHORED_PATH)))
                 .returns(() => true);
 
             const response = testUtils.getStackTraceResponseBody(RUNTIME_PATH, RUNTIME_BPS(), [1, 2, 3]);

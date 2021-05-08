@@ -14,13 +14,15 @@ import { ISourceMapPathOverrides, IPathMapping } from '../debugAdapterInterfaces
  * Resolves a relative path in terms of another file
  */
 export function resolveRelativeToFile(absPath: string, relPath: string): string {
-    return path.resolve(path.dirname(absPath), relPath);
+    return utils.properResolve(path.dirname(absPath), relPath);
 }
 
 /**
  * Determine an absolute path for the sourceRoot.
  */
 export function getComputedSourceRoot(sourceRoot: string, generatedPath: string, pathMapping: IPathMapping = {}): string {
+    generatedPath = utils.fileUrlToPath(generatedPath);
+
     let absSourceRoot: string;
     if (sourceRoot) {
         if (sourceRoot.startsWith('file:///')) {
@@ -42,7 +44,7 @@ export function getComputedSourceRoot(sourceRoot: string, generatedPath: string,
             const generatedUrlPath = url.parse(generatedPath).pathname;
             const mappedPath = chromeUtils.applyPathMappingsToTargetUrlPath(generatedUrlPath, pathMapping);
             const mappedDirname = path.dirname(mappedPath);
-            absSourceRoot = path.join(mappedDirname, sourceRoot);
+            absSourceRoot = utils.properJoin(mappedDirname, sourceRoot);
         }
 
         logger.log(`SourceMap: resolved sourceRoot ${sourceRoot} -> ${absSourceRoot}`);
@@ -111,7 +113,7 @@ export function applySourceMapPathOverrides(sourcePath: string, sourceMapPathOve
         // replacement pattern, and return the result.
         const wildcardValue = overridePatternMatches[1];
         let mappedPath = rightPattern.replace(/\*/g, wildcardValue);
-        mappedPath = path.join(mappedPath); // Fix any ..
+        mappedPath = utils.properJoin(mappedPath); // Fix any ..
         if (isVSClient && leftPattern === 'webpack:///./*' && !utils.existsSync(mappedPath)) {
             // This is a workaround for a bug in ASP.NET debugging in VisualStudio because the wwwroot is not properly configured
             const pathFixingASPNETBug = path.join(rightPattern.replace(/\*/g, path.join('../ClientApp', wildcardValue)));

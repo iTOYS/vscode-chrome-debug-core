@@ -3,6 +3,7 @@
  *--------------------------------------------------------*/
 
 import { Protocol as Crdp } from 'devtools-protocol';
+import * as Color from 'color';
 import * as variables from './variables';
 
 export function formatExceptionDetails(e: Crdp.Runtime.ExceptionDetails): string {
@@ -14,9 +15,10 @@ export function formatExceptionDetails(e: Crdp.Runtime.ExceptionDetails): string
         (`Error: ${variables.getRemoteObjectPreview(e.exception)}\n${stackTraceToString(e.stackTrace)}`);
 }
 
-export function formatConsoleArguments(m: Crdp.Runtime.ConsoleAPICalledEvent): { args: Crdp.Runtime.RemoteObject[], isError: boolean } {
-    let args: Crdp.Runtime.RemoteObject[];
-    switch (m.type) {
+export const clearConsoleCode = '\u001b[2J';
+
+export function formatConsoleArguments(type: Crdp.Runtime.ConsoleAPICalledEvent['type'], args: Crdp.Runtime.RemoteObject[], stackTrace?: Crdp.Runtime.StackTrace): { args: Crdp.Runtime.RemoteObject[], isError: boolean } {
+    switch (type) {
         case 'log':
         case 'debug':
         case 'info':
@@ -25,27 +27,28 @@ export function formatConsoleArguments(m: Crdp.Runtime.ConsoleAPICalledEvent): {
         case 'dir':
         case 'timeEnd':
         case 'count':
-            args = resolveParams(m);
+            args = resolveParams(args);
             break;
         case 'assert':
-            const formattedParams = m.args.length ?
+            const formattedParams = args.length ?
                 // 'assert' doesn't support format specifiers
-                resolveParams(m, /*skipFormatSpecifiers=*/true) :
+                resolveParams(args, /*skipFormatSpecifiers=*/true) :
                 [];
 
             const assertMsg = (formattedParams[0] && formattedParams[0].type === 'string') ?
                 formattedParams.shift().value :
                 '';
-            let outputText = `Assertion failed: ${assertMsg}\n` + stackTraceToString(m.stackTrace);
+            let outputText = `Assertion failed: ${assertMsg}\n` + stackTraceToString(stackTrace);
 
             args = [{ type: 'string', value: outputText }, ...formattedParams];
             break;
         case 'startGroup':
         case 'startGroupCollapsed':
             let startMsg = '‹Start group›';
-            const formattedGroupParams = resolveParams(m);
-            if (formattedGroupParams.length && formattedGroupParams[0].type === 'string') {
-                startMsg += ': ' + formattedGroupParams.shift().value;
+            const formattedGroupParams = resolveParams(args);
+            const previewMessage = formattedGroupParams.find(x => x && x.type === 'string');
+            if (previewMessage) {
+                startMsg += ': ' + previewMessage.value;
             }
 
             args = [{ type: 'string', value: startMsg}, ...formattedGroupParams];
@@ -54,34 +57,32 @@ export function formatConsoleArguments(m: Crdp.Runtime.ConsoleAPICalledEvent): {
             args = [{ type: 'string', value: '‹End group›' }];
             break;
         case 'trace':
-            args = [{ type: 'string', value: 'console.trace()\n' + stackTraceToString(m.stackTrace) }];
+            args = [{ type: 'string', value: 'console.trace()\n' + stackTraceToString(stackTrace) }];
             break;
-        // case 'clear':
-        // Microsoft/vscode-debugadapter-node#185
-        // Needs https://github.com/Microsoft/vscode/issues/51245 and https://github.com/Microsoft/vscode/issues/51246
-        //     args = [{ type: 'string', value: '\u001b[2J' }];
-        //     break;
+        case 'clear':
+            args = [{ type: 'string', value: clearConsoleCode }];
+            break;
         default:
             // Some types we have to ignore
             return null;
     }
 
-    const isError = m.type === 'assert' || m.type === 'error';
+    const isError = type === 'assert' || type === 'error';
     return { args, isError };
 }
 
 /**
  * Collapse non-object arguments, and apply format specifiers (%s, %d, etc). Return a reduced a formatted list of RemoteObjects.
  */
-function resolveParams(m: Crdp.Runtime.ConsoleAPICalledEvent, skipFormatSpecifiers?: boolean): Crdp.Runtime.RemoteObject[] {
-    if (!m.args.length || m.args[0].objectId) {
+function resolveParams(args: Crdp.Runtime.RemoteObject[], skipFormatSpecifiers?: boolean): Crdp.Runtime.RemoteObject[] {
+    if (!args.length || args[0].objectId) {
         // If the first arg is not text, nothing is going to happen here
-        return m.args;
+        return args;
     }
 
     // Find all %s, %i, etc in the first argument, which is always the main text. Strip %
     let formatSpecifiers: string[];
-    const firstTextArg = m.args.shift();
+    const firstTextArg = args.shift();
 
     // currentCollapsedStringArg is the accumulated text
     let currentCollapsedStringArg = variables.getRemoteObjectPreview(firstTextArg, /*stringify=*/false) + '';
@@ -100,8 +101,8 @@ function resolveParams(m: Crdp.Runtime.ConsoleAPICalledEvent, skipFormatSpecifie
     };
 
     // Collapse all text parameters, formatting properly if there's a format specifier
-    for (let argIdx = 0; argIdx < m.args.length; argIdx++) {
-        const arg = m.args[argIdx];
+    for (let argIdx = 0; argIdx < args.length; argIdx++) {
+        const arg = args[argIdx];
 
         const formatSpec = formatSpecifiers.shift();
         const formatted = formatArg(formatSpec, arg);
@@ -147,9 +148,7 @@ function formatArg(formatSpec: string, arg: Crdp.Runtime.RemoteObject): string |
     } else if (formatSpec === 'f') {
         return +paramValue + '';
     } else if (formatSpec === 'c') {
-        // Remove %c - Applies CSS color rules
-        // Could use terminal color codes in the future
-        return '';
+        return formatColorArg(arg);
     } else if (formatSpec === 'O') {
         if (arg.objectId) {
             return arg;
@@ -167,6 +166,59 @@ function formatArg(formatSpec: string, arg: Crdp.Runtime.RemoteObject): string |
     }
 }
 
+function formatColorArg(arg: Crdp.Runtime.RemoteObject): string {
+    const cssRegex = /\s*(.*?)\s*:\s*(.*?)\s*(?:;|$)/g;
+
+    let escapedSequence: string | undefined;
+    let match = cssRegex.exec(arg.value);
+    while (match != null) {
+        if (match.length === 3) {
+            if (escapedSequence === undefined) {
+                // Some valid pattern appeared, initialize escapedSequence.
+                // If the pattern has no value like `color:`, then this should remain an empty string.
+                escapedSequence = '';
+            }
+
+            if (match[2]) {
+                switch (match[1]) {
+                    case 'color':
+                        const color = getAnsi16Color(match[2]);
+                        if (color) {
+                            escapedSequence += `;${color}`;
+                        }
+                        break;
+                    case 'background':
+                        const background = getAnsi16Color(match[2]);
+                        if (background) {
+                            escapedSequence += `;${background + 10}`;
+                        }
+                        break;
+                    case 'font-weight':
+                        if (match[2] === 'bold') {
+                            escapedSequence += ';1';
+                        }
+                        break;
+                    case 'text-decoration':
+                        if (match[2] === 'underline') {
+                            escapedSequence += ';4';
+                        }
+                        break;
+                    default:
+                    // css not mapped, skip
+                }
+            }
+        }
+
+        match = cssRegex.exec(arg.value);
+    }
+
+    if (typeof escapedSequence === 'string') {
+        escapedSequence = `\x1b[0${escapedSequence}m`;
+    }
+
+    return escapedSequence;
+}
+
 function stackTraceToString(stackTrace: Crdp.Runtime.StackTrace): string {
     if (!stackTrace) {
         return '';
@@ -179,4 +231,17 @@ function stackTraceToString(stackTrace: Crdp.Runtime.StackTrace): string {
             return `    at ${fnName} (${fileName}:${frame.lineNumber + 1}:${frame.columnNumber})`;
         })
         .join('\n');
+}
+
+function getAnsi16Color(colorString: string): number {
+    try {
+      // Color can parse hex and color names
+      const color = new Color(colorString);
+      return color.ansi16().object().ansi16;
+    } catch (ex) {
+      // Unable to parse Color
+      // For instance, "inherit" color will throw
+    }
+
+    return undefined;
 }

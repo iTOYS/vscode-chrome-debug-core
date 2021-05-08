@@ -4,8 +4,6 @@
 
 import { DebugProtocol } from 'vscode-debugprotocol';
 
-import { logger } from 'vscode-debugadapter';
-
 import { getMockLineNumberTransformer, getMockPathTransformer, getMockSourceMapTransformer } from '../mocks/transformerMocks';
 import { getMockChromeConnectionApi, IMockChromeConnectionAPI } from '../mocks/debugProtocolMocks';
 
@@ -29,6 +27,7 @@ import * as fs from 'fs';
 /** Not mocked - use for type only */
 import {ChromeDebugAdapter as _ChromeDebugAdapter } from '../../src/chrome/chromeDebugAdapter';
 import { InitializedEvent, LoadedSourceEvent, Source, BreakpointEvent } from 'vscode-debugadapter/lib/debugSession';
+import { Version, TargetVersions } from '../../src';
 
 const MODULE_UNDER_TEST = '../../src/chrome/chromeDebugAdapter';
 suite('ChromeDebugAdapter', () => {
@@ -81,7 +80,10 @@ suite('ChromeDebugAdapter', () => {
             .setup(x => x.run())
             .returns(() => Promise.resolve())
             .verifiable(Times.atLeast(0));
-
+        mockChromeConnection
+            .setup(x => x.version)
+            .returns(() => Promise.resolve(new TargetVersions(Version.unknownVersion(), Version.unknownVersion())))
+            .verifiable(Times.atLeast(0));
         mockLineNumberTransformer = getMockLineNumberTransformer();
         mockSourceMapTransformer = getMockSourceMapTransformer();
         mockPathTransformer = getMockPathTransformer();
@@ -117,9 +119,6 @@ suite('ChromeDebugAdapter', () => {
         mockery.deregisterAll();
         mockery.disable();
 
-        // To avoid warnings about leaking event listeners
-        await logger.dispose();
-
         mockChromeConnection.verifyAll();
         mockChrome.Debugger.verifyAll();
     });
@@ -127,7 +126,7 @@ suite('ChromeDebugAdapter', () => {
     function emitScriptParsed(url: string, scriptId: string, sources: string[] = []): void {
         mockPathTransformer.setup(m => m.scriptParsed(It.isValue(url)))
             .returns(() => Promise.resolve(url));
-        mockSourceMapTransformer.setup(m => m.scriptParsed(It.isAny(), It.isValue(undefined)))
+        mockSourceMapTransformer.setup(m => m.scriptParsed(It.isAny(), It.isAny(), It.isValue(undefined)))
             .returns(() => Promise.resolve(sources));
         mockSourceMapTransformer.setup(m => m.getGeneratedPathFromAuthoredPath(It.isAnyString()))
             .returns(authoredPath => {
@@ -184,7 +183,7 @@ suite('ChromeDebugAdapter', () => {
 
     suite('setBreakpoints()', () => {
         const BP_ID = 'bpId';
-        const FILE_NAME = 'file:///a.js';
+        const FILE_NAME = '/a.js';
         const SCRIPT_ID = '1';
         function expectSetBreakpoint(breakpoints: DebugProtocol.SourceBreakpoint[], url?: string, scriptId = SCRIPT_ID, success = true): void {
             breakpoints.forEach((bp, i) => {
@@ -401,7 +400,7 @@ suite('ChromeDebugAdapter', () => {
                 .returns(() => Promise.resolve(generatedScriptPath));
 
             mockSourceMapTransformer.setup(x => x.setBreakpoints(It.isAny(), It.isAnyNumber(), It.isAny()))
-                .returns(( args: ISetBreakpointsArgs, ids: number[]) => {
+                .returns((args: ISetBreakpointsArgs, ids: number[]) => {
                     args.source.path = generatedScriptPath;
                     return { args, ids };
                 });
@@ -540,7 +539,7 @@ suite('ChromeDebugAdapter', () => {
         const FILE_NAME = 'file:///a.js';
         const SCRIPT_ID = '1';
         function emitScriptParsed(url = FILE_NAME, scriptId = SCRIPT_ID, otherArgs: any = {}): void {
-            mockSourceMapTransformer.setup(m => m.scriptParsed(It.isValue(undefined), It.isValue(undefined)))
+            mockSourceMapTransformer.setup(m => m.scriptParsed(It.isValue(undefined), url, It.isValue(undefined)))
                 .returns(() => Promise.resolve([]));
             otherArgs.url = url;
             otherArgs.scriptId = scriptId;
@@ -555,7 +554,7 @@ suite('ChromeDebugAdapter', () => {
                         assert(!!url, 'Default url missing'); // Should be called with some default url
                         return url;
                     });
-                mockSourceMapTransformer.setup(m => m.scriptParsed(It.isAny(), It.isValue(undefined)))
+                mockSourceMapTransformer.setup(m => m.scriptParsed(It.isAny(), It.isAny(), It.isValue(undefined)))
                     .returns(() => {
                         done();
                         return Promise.resolve([]);
@@ -697,10 +696,10 @@ suite('ChromeDebugAdapter', () => {
                 new LoadedSourceEvent('new', createSource('about:blank', 'about:blank', 1000)),
                 new LoadedSourceEvent('removed', createSource('about:blank', 'about:blank', 1000)),
                 new LoadedSourceEvent('new', createSource('localhost:61312', 'http://localhost:61312', 1001))
-              ];
+            ];
 
-              const receivedEvents: DebugProtocol.Event[] = [];
-              sendEventHandler = (event: DebugProtocol.Event) => { receivedEvents.push(event); };
+            const receivedEvents: DebugProtocol.Event[] = [];
+            sendEventHandler = (event: DebugProtocol.Event) => { receivedEvents.push(event); };
 
             await chromeDebugAdapter.attach(ATTACH_ARGS);
             emitScriptParsed('about:blank', '1');
@@ -754,16 +753,21 @@ suite('ChromeDebugAdapter', () => {
             });
         });
 
-        test('calls Debugger.evaluateOnCallFrame when paused', () => {
-            const callFrameId = '1';
+        test('calls Debugger.evaluateOnCallFrame when paused', async () => {
+            await chromeDebugAdapter.attach(ATTACH_ARGS);
+            const callFrameId = 'id1';
             const expression = '1+1';
+            const scriptId = 'blub';
+            const location: Crdp.Debugger.Location = { lineNumber: 0, columnNumber: 0, scriptId };
+            const callFrame = { callFrameId: 'id1', location };
             const result: Crdp.Runtime.RemoteObject = { type: 'string', description: '2' };
             setupEvalOnCallFrameMock(expression, callFrameId, result);
 
-            // Sue me (just easier than sending a Debugger.paused event)
-            (<any>chromeDebugAdapter)._frameHandles = { get: () => ({ callFrameId })};
+            emitScriptParsed('', scriptId);
+            mockEventEmitter.emit('Debugger.paused', <Crdp.Debugger.PausedEvent>{ callFrames: [callFrame, callFrame] });
+            await chromeDebugAdapter.stackTrace({ threadId: THREAD_ID });
 
-            return chromeDebugAdapter.evaluate({ expression, frameId: 0 }).then(response => {
+            await chromeDebugAdapter.evaluate({ expression, frameId: 1000 }).then(response => {
                 assert.deepEqual(response, getExpectedValueResponse(result));
             });
         });
@@ -843,7 +847,10 @@ suite('ChromeDebugAdapter', () => {
             // because reset() creates a new instance of object
             mockSourceMapTransformer.reset();
             mockery.resetCache();
-            mockery.registerMock('fs', { statSync: () => { } });
+            mockery.registerMock('fs', {
+                statSync: () => { },
+                stat: (path, cb) => cb()
+            });
             initChromeDebugAdapter();
 
             await chromeDebugAdapter.attach(ATTACH_ARGS);
@@ -857,6 +864,18 @@ suite('ChromeDebugAdapter', () => {
 
             mockEventEmitter.emit('Runtime.exceptionThrown', exceptionEvent);
             await sendEventP;
+        });
+    });
+
+    suite('break-on-load', () => {
+        test('is active when the parameter is specified and we are launching', async () => {
+            await chromeDebugAdapter.launch({breakOnLoadStrategy: 'regex'});
+            assert(chromeDebugAdapter.breakOnLoadActive, 'Break on load should be active if we pass the proper parameter and we are attaching');
+        });
+
+        test('is active when the parameter is specified and we are attaching', async () => {
+            await chromeDebugAdapter.attach({breakOnLoadStrategy: 'regex', port: ATTACH_SUCCESS_PORT});
+            assert(chromeDebugAdapter.breakOnLoadActive, 'Break on load should be active if we pass the proper parameter and we are attaching');
         });
     });
 

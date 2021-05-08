@@ -14,6 +14,29 @@ import { ITargetDiscoveryStrategy, ITargetFilter, ITarget } from './chromeConnec
 import * as nls from 'vscode-nls';
 const localize = nls.loadMessageBundle();
 
+export class Version {
+    static parse(versionString: string): Version {
+        const majorAndMinor = versionString.split('.');
+        const major = parseInt(majorAndMinor[0], 10);
+        const minor = parseInt(majorAndMinor[1], 10);
+        return new Version(major, minor);
+    }
+
+    public static unknownVersion(): Version {
+        return new Version(0, 0); // Using 0.0 will make behave isAtLeastVersion as if this was the oldest possible version
+    }
+
+    constructor(private _major: number, private _minor: number) {}
+
+    public isAtLeastVersion(major: number, minor: number): boolean {
+        return this._major > major || (this._major === major && this._minor >= minor);
+    }
+}
+
+export class TargetVersions {
+    constructor(public readonly protocol: Version, public readonly browser: Version) {}
+}
+
 export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObservableEvents<IStepStartedEventsEmitter> {
     private logger: Logger.ILogger;
     private telemetry: telemetry.ITelemetryReporter;
@@ -55,7 +78,7 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObserva
         return this._getMatchingTargets(targets, targetFilter, targetUrl);
     }
 
-    private async _getVersionData(address: string, port: number): Promise<void> {
+    private async _getVersionData(address: string, port: number): Promise<TargetVersions> {
 
         const url = `http://${address}:${port}/json/version`;
         this.logger.log(`Getting browser and debug protocol version via ${url}`);
@@ -66,8 +89,10 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObserva
         try {
             if (jsonResponse) {
                 const response = JSON.parse(jsonResponse);
-                this.logger.log(`Got browser version: ${response.Browser}`);
-                this.logger.log(`Got debug protocol version: ${response['Protocol-Version']}`);
+                const protocolVersionString = response['Protocol-Version'] as string;
+                const browserWithPrefixVersionString = response.Browser as string;
+                this.logger.log(`Got browser version: ${browserWithPrefixVersionString }`);
+                this.logger.log(`Got debug protocol version: ${protocolVersionString}`);
 
                 /* __GDPR__
                    "targetDebugProtocolVersion" : {
@@ -75,17 +100,27 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObserva
                        "${include}": [ "${DebugCommonProperties}" ]
                    }
                  */
+
+                const chromePrefix = 'Chrome/';
+                let browserVersion = Version.unknownVersion();
+                if (browserWithPrefixVersionString.startsWith(chromePrefix)) {
+                    const browserVersionString = browserWithPrefixVersionString.substr(chromePrefix.length);
+                    browserVersion = Version.parse(browserVersionString);
+                }
+
                 this.telemetry.reportEvent('targetDebugProtocolVersion', { debugProtocolVersion: response['Protcol-Version'] });
+                return new TargetVersions(Version.parse(protocolVersionString), browserVersion);
             }
         } catch (e) {
             this.logger.log(`Didn't get a valid response for /json/version call. Error: ${e.message}. Response: ${jsonResponse}`);
         }
+        return new TargetVersions(Version.unknownVersion(), Version.unknownVersion());
     }
 
     private async _getTargets(address: string, port: number): Promise<ITarget[]> {
 
         // Get the browser and the protocol version
-        this._getVersionData(address, port);
+        const version = this._getVersionData(address, port);
 
         /* __GDPR__FRAGMENT__
            "StepNames" : {
@@ -109,16 +144,30 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObserva
            }
          */
         this.events.emitStepStarted('Attach.ProcessDebuggerTargetsInformation');
+        let responseArray: any;
+
         try {
-            const responseArray = JSON.parse(jsonResponse);
-            if (Array.isArray(responseArray)) {
-                return (responseArray as ITarget[])
-                    .map(target => this._fixRemoteUrl(address, port, target));
-            } else {
-                return utils.errP(localize('attach.invalidResponseArray', 'Response from the target seems invalid: {0}', jsonResponse));
-            }
+            responseArray = JSON.parse(jsonResponse);
         } catch (e) {
-            return utils.errP(localize('attach.invalidResponse', 'Response from the target seems invalid. Error: {0}. Response: {1}', e.message, jsonResponse));
+            try {
+                // If it fails to parse, this is possibly https://github.com/electron/electron/issues/11524.
+                // Workaround, just snip out the title property and try again.
+                // Since we don't know exactly which characters might break JSON.parse or why, we can't give a more targeted fix.
+                responseArray = JSON.parse(removeTitleProperty(jsonResponse));
+            } catch (e) {
+                return utils.errP(localize('attach.invalidResponse', 'Response from the target seems invalid. Error: {0}. Response: {1}', e.message, jsonResponse));
+            }
+        }
+
+        if (Array.isArray(responseArray)) {
+            return (responseArray as ITarget[])
+                .map(target => {
+                    this._fixRemoteUrl(address, port, target);
+                    target.version = version;
+                    return target;
+                });
+        } else {
+            return utils.errP(localize('attach.invalidResponseArray', 'Response from the target seems invalid: {0}', jsonResponse));
         }
     }
 
@@ -156,4 +205,8 @@ export class ChromeTargetDiscovery implements ITargetDiscoveryStrategy, IObserva
 
         return target;
     }
+}
+
+export function removeTitleProperty(targetsResponse: string): string {
+    return targetsResponse.replace(/"title": "[^"]+",?/, '');
 }

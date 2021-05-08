@@ -2,7 +2,7 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import { SourceMapConsumer, MappedPosition } from 'source-map';
+import { SourceMapConsumer, MappedPosition as MappedPositionSM } from 'source-map';
 import * as path from 'path';
 
 import * as sourceMapUtils from './sourceMapUtils';
@@ -10,7 +10,7 @@ import * as utils from '../utils';
 import { logger } from 'vscode-debugadapter';
 import { IPathMapping } from '../debugAdapterInterfaces';
 
-export type MappedPosition = MappedPosition;
+export type MappedPosition = MappedPositionSM;
 
 /**
  * A pair of the original path in the sourcemap, and the full absolute path as inferred
@@ -116,7 +116,7 @@ export class SourceMap {
 
             if (!path.isAbsolute(sourcePath)) {
                 // Overrides not applied, use the computed sourceRoot
-                sourcePath = path.resolve(computedSourceRoot, sourcePath);
+                sourcePath = utils.properResolve(computedSourceRoot, sourcePath);
             }
 
             return utils.canonicalizeUrl(sourcePath);
